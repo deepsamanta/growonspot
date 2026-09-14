@@ -1,0 +1,6 @@
+requests>=2.32.3,<3
+Telethon>=1.36,<2
+Pillow>=11,<13
+rapidocr-onnxruntime==1.4.4
+onnxruntime>=1.18,<2
+python-dotenv>=1.0.1,<2

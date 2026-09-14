@@ -1,0 +1,22 @@
+services:
+  trader:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    init: true
+    volumes:
+      - ./data:/app/data
+      - ./sessions:/app/sessions
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
