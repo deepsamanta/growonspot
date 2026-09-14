@@ -17,6 +17,8 @@ class Config:
     secret: str = os.getenv('COINDCX_API_SECRET', '')
     api_id: int = int(os.getenv('TELEGRAM_API_ID') or 0)
     api_hash: str = os.getenv('TELEGRAM_API_HASH', '')
+    bot_token: str = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    alert_chat_id: str = os.getenv('TELEGRAM_CHAT_ID', '')
     phone: str = os.getenv('TELEGRAM_PHONE', '')
     session: str = os.getenv('TELEGRAM_SESSION_NAME', 'sessions/xau')
     channel: int = int(os.getenv('TELEGRAM_CHANNEL_ID', '-1001496382172'))
@@ -33,6 +35,8 @@ class Config:
     database: str = os.getenv('DATABASE_PATH', 'data/bot.sqlite3')
 
     def validate(self, login=False):
+        if bool(self.bot_token.strip()) != bool(self.alert_chat_id.strip()):
+            raise ValueError('Set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for alerts')
         if not self.api_id or not self.api_hash:
             raise ValueError('Configure TELEGRAM_API_ID and TELEGRAM_API_HASH in .env')
         if not login and (not self.key or not self.secret):

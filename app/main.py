@@ -3,18 +3,20 @@ import fcntl
 import hashlib
 import json
 import sys
+import os
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from telethon import TelegramClient
+from .alerts import TelegramAlerts, PREFIX
 from .config import Config
 from .database import Database
 from .exchange import CoinDCX
 from .signals import extract_image, should_close_from_text
 from .trading import Trader
 
-async def main():
+async def main(alerts):
     c = Config()
     login = '--login' in sys.argv
     c.validate(login=login)
@@ -35,7 +37,7 @@ async def main():
         raise RuntimeError('Run docker compose run --rm trader python -m app.main --login first')
     await client.get_dialogs()
     channel = await client.get_entity(c.channel)
-    db = Database(c.database)
+    db = Database(c.database, alerts)
     ex = CoinDCX(c)
     info = await asyncio.to_thread(ex.discover)
     db.event('INSTRUMENT_DISCOVERED', pair=ex.pair, quantity_step=info['quantity_increment'], price_tick=info['price_increment'])
@@ -66,9 +68,12 @@ async def main():
     loop = asyncio.get_running_loop()
     async def worker(fn, *args):
         return await loop.run_in_executor(executor, fn, *args)
-    db = await worker(Database, c.database)
+    db = await worker(Database, c.database, alerts)
     trader = Trader(c, db, ex)
     await worker(db.event, 'TELEGRAM_CONNECTED')
+    alerts.emit('BOT_STARTED', margin=str(c.margin), leverage=c.leverage, dry=c.dry)
+    if not alerts.enabled:
+        await worker(db.event, 'TELEGRAM_ALERTS_NOT_CONFIGURED')
     offset = await worker(db.offset, c.channel)
     if offset is None:
         latest = await client.get_messages(channel, limit=1)
@@ -82,6 +87,10 @@ async def main():
                 # Bound each batch so position reconciliation cannot be starved by a long backlog.
                 async for message in client.iter_messages(channel, min_id=offset, reverse=True, limit=100):
                     text = message.raw_text or ''
+                    if text.startswith(PREFIX):
+                        offset = message.id
+                        await worker(db.advance, c.channel, offset)
+                        continue
                     if message.photo:
                         age = time.time() - message.date.timestamp()
                         if age <= c.max_age:
@@ -100,6 +109,7 @@ async def main():
                                     await worker(trader.enter, signal_id, message.id, signal)
                             except ValueError as error:
                                 await worker(db.event, str(error))
+                                alerts.emit('SIGNAL_REJECTED', message_id=message.id, reason=str(error))
                         else:
                             await worker(db.event, 'STALE_IMAGE_SKIPPED')
                     elif not message.media and should_close_from_text(text, c.keywords):
@@ -131,4 +141,11 @@ async def main():
         lock.close()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    alerts = TelegramAlerts(os.getenv('TELEGRAM_BOT_TOKEN', ''), os.getenv('TELEGRAM_CHAT_ID', ''))
+    try:
+        asyncio.run(main(alerts))
+    except Exception as error:
+        alerts.emit('BOT_FATAL', error_type=type(error).__name__)
+        raise
+    finally:
+        alerts.close()

@@ -4,7 +4,8 @@ import time
 from pathlib import Path
 
 class Database:
-    def __init__(self, path):
+    def __init__(self, path, alerts=None):
+        self.alerts = alerts
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
@@ -31,6 +32,11 @@ class Database:
         print(json.dumps({'event': kind, 'time': time.time(), **data}), flush=True)
         self.conn.execute('INSERT INTO bot_events(event_type,data_json,created_at) VALUES(?,?,?)', (kind, json.dumps(data), time.time()))
         self.conn.commit()
+        if self.alerts:
+            try:
+                self.alerts.emit(kind, **data)
+            except Exception:
+                print(json.dumps({'event': 'ALERT_ENQUEUE_FAILED'}), flush=True)
 
     def offset(self, channel):
         row = self.conn.execute('SELECT last_processed_message_id FROM telegram_state WHERE channel=?', (channel,)).fetchone()
@@ -62,6 +68,9 @@ class Database:
         data = {**trade['data'], **changes}
         self.conn.execute('UPDATE trades SET status=?,data_json=? WHERE id=?', (status, json.dumps(data), trade['id']))
         self.conn.commit()
+        if status != trade['status'] and status in ('UNCERTAIN', 'ISOLATION_CONFLICT'):
+            kind = 'ORDER_UNCERTAIN' if status == 'UNCERTAIN' else status
+            self.event(kind, trade_id=trade['id'], message_id=data.get('message_id'))
 
     def close(self, trade, reason, loss_charge):
         self.update(trade, 'CLOSED', exit_reason=reason)

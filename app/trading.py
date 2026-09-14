@@ -49,7 +49,6 @@ class Trader:
             self.db.event('ORDER_SUBMITTED', trade_id=trade['id'], order_id=order_id)
         except Exception:
             self.db.update(trade, 'UNCERTAIN')
-            self.db.event('ORDER_UNCERTAIN', trade_id=trade['id'])
         self.reconcile()
 
     def ownership(self, trade, position):
@@ -112,11 +111,12 @@ class Trader:
             trade = self.db.active()
         if not self.ownership(trade, p):
             self.db.update(trade, 'ISOLATION_CONFLICT')
-            self.db.event('ISOLATION_CONFLICT', trade_id=trade['id'])
             return
         if trade['status'] == 'ISOLATION_CONFLICT':
             return  # Manual review required after any unexpected account modification.
         if trade['status'] == 'CLOSING':
+            if time.time() - d.get('close_requested_at', 0) > 30:
+                self.db.event('EXIT_UNCONFIRMED', trade_id=trade['id'])
             return  # Never repeat an uncertain exit and risk affecting a subsequent position.
         self.db.update(trade, 'PROTECTING', **{**d, 'position_id': p['id'], 'actual_fill_price': str(p['avg_price'])})
         trade = self.db.active()
@@ -137,7 +137,11 @@ class Trader:
                 self.db.event('PROTECTION_FAILED_EMERGENCY_EXIT', trade_id=trade['id'])
                 self.close('ERROR_PROTECTION')
                 return
-        self.db.update(trade, 'OPEN')
+        self.db.update(trade, 'OPEN', open_alerted=True)
+        if not d.get('open_alerted'):
+            self.db.event('POSITION_OPEN', trade_id=trade['id'], message_id=d['message_id'],
+                          side=d['side'], quantity=d['quantity'], actual_fill_price=d['actual_fill_price'],
+                          sl=d['sl'], tp=d['tp'], margin=d['margin'], leverage=d.get('leverage'))
 
     def close(self, reason, reply_to=None):
         trade = self.db.active()
@@ -158,5 +162,9 @@ class Trader:
             return
         trade = self.db.active()
         self.db.update(trade, 'CLOSING', close_requested_at=time.time())
-        self.ex.exit(d['position_id'])
+        try:
+            self.ex.exit(d['position_id'])
+        except Exception:
+            self.db.event('EXIT_REQUEST_FAILED', trade_id=trade['id'], reason=reason)
+            raise
         self.db.event('POSITION_CLOSE_REQUESTED', trade_id=trade['id'], reason=reason)

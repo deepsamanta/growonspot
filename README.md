@@ -46,6 +46,30 @@ Restart after configuration changes with `docker compose up -d --force-recreate`
 - Entry intent is committed before sending an order. Ambiguous requests are never resubmitted. Restart recovery reconciles the stored intent with the exchange. `UNCERTAIN`, `ISOLATION_CONFLICT`, or an unconfirmed `CLOSING` state requires reviewing CoinDCX and the database; the bot blocks new entries. Do not delete the database to clear an unresolved live trade. An exit is sent once, then reconciled; a rejected/uncertain exit needs manual intervention.
 - Daily limits use UTC: 10 entry attempts and a 10 USDT **conservative loss allowance** by default. Each closed trade charges its full configured margin against that allowance, even a winner, because this version does not reconstruct realized PnL, funding and fees from account transactions. This is deliberately more restrictive than realized-PnL counting; it is not an exact daily loss report. Exit price and cause remain unknown when the exchange closes a position independently; the bot records `EXCHANGE_CLOSED` rather than inventing a TP/SL classification.
 
+## Telegram alerts
+
+Use the same alert bot and destination as your reference bot. Add these to your VPS `.env` (existing `.env` files are not updated by `git pull`):
+
+```dotenv
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_alert_chat_id
+```
+
+Both values are required to enable alerts; leaving both blank disables notifications and logs `TELEGRAM_ALERTS_NOT_CONFIGURED`. For a personal chat, start a conversation with the bot first. For a channel, add the bot as an administrator with permission to post. The alert destination is separate from `TELEGRAM_CHANNEL_ID`, which controls signal monitoring. Notifications use Telegram's [sendMessage API](https://core.telegram.org/bots/api#sendmessage).
+
+Alerts cover startup, submitted entries, confirmed protected positions, requested exits, confirmed closures, skipped entries, image rejection, uncertain orders, failed exits, protection failure, isolation conflicts, loop errors, and fatal application errors. An unconfirmed exit is flagged after 30 seconds. Order submission and exit requests are explicitly distinguished from confirmed fills and closures. Fill/SL/TP details are included with position-open alerts.
+
+Delivery runs in a separate thread, uses bounded timeouts and up to three attempts, and honors short Telegram retry-after delays. Repeated matching events are suppressed for five minutes. The in-memory queue holds 100 notifications; overflow or delivery failure is logged without interrupting trade management. Alerts are best-effort and may be lost on a crash, prolonged outage or full queue; Docker logs remain the event record. The bot cannot report a VPS/network outage while it is offline. Messages beginning `[XAU BOT]` are ignored by the signal listener to prevent its own alerts triggering exits.
+
+After pulling updated code and filling in the two values:
+
+```sh
+docker compose up -d --build --force-recreate
+docker compose logs --tail=100 trader
+```
+
+A startup notification is sent when initialization succeeds. No test trade is needed.
+
 ## Persistence and operations
 
 `data/` stores SQLite and downloaded photos; `sessions/` stores Telegram authorization. Back up both and protect them like credentials. Run only one replica. The schema initializes automatically (`PRAGMA user_version=1`) with `signals`, `trades`, `telegram_state`, and `bot_events`; variable exchange/signal fields are held in JSON columns. A partial unique index enforces one active trade. Structured logs omit secrets; Docker logs rotate at 10 MB × 3. Photo/event retention is operator-managed.
@@ -66,7 +90,7 @@ API implementation reference: https://docs.coindcx.com/ (futures active instrume
 
 ## Validation completed
 
-All 12 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
+All 19 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
 
 | Image | Side | Entry | SL | TP |
 |---|---|---:|---:|---:|
