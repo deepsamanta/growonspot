@@ -26,8 +26,8 @@ class Config:
     leverage: int = int(os.getenv('LEVERAGE', '5'))
     dry: bool = boolean('DRY_RUN', 'false')
     enabled: bool = boolean('TRADING_ENABLED', 'true')
-    deviation: Decimal = Decimal(os.getenv('MAX_ENTRY_DEVIATION_PERCENT', '0.50'))
-    max_age: int = int(os.getenv('MAX_SIGNAL_AGE_SECONDS', '120'))
+    new_signal_window: int = int(os.getenv('NEW_SIGNAL_WINDOW_SECONDS', '1200'))
+    max_age: int = int(os.getenv('MAX_SIGNAL_AGE_SECONDS', '1200'))
     keywords: tuple = tuple(x.strip() for x in os.getenv('CLOSE_KEYWORDS', 'partial,booked,closed,taken').split(',') if x.strip())
     daily_trades: int = int(os.getenv('MAX_DAILY_TRADES', '10'))
     daily_loss: Decimal = Decimal(os.getenv('MAX_DAILY_LOSS_USDT') or '10')
@@ -47,7 +47,7 @@ class Config:
             raise ValueError('Invalid margin/leverage')
         if self.daily_trades < 1 or not self.daily_loss.is_finite() or self.daily_loss <= 0 or self.poll < 1 or self.max_age < 1:
             raise ValueError('Invalid limits')
-        if not self.deviation.is_finite() or self.deviation < 0:
-            raise ValueError('Invalid entry deviation')
+        if not 1 <= self.new_signal_window <= self.max_age:
+            raise ValueError('NEW_SIGNAL_WINDOW_SECONDS must be between 1 and MAX_SIGNAL_AGE_SECONDS')
         if os.getenv('FIXED_QUANTITY') or os.getenv('ENTRY_MODE', 'MARKET') != 'MARKET':
             raise ValueError('Version 1 uses margin sizing and MARKET entries only')

@@ -35,16 +35,24 @@ Restart after configuration changes with `docker compose up -d --force-recreate`
 
 ## Behavior and safeguards
 
-- Only Telegram photos open positions. Text, image documents, stickers, video and other media cannot open one. Only XAUUSD/XAUUSDT parses; one complete card, direction, entry arrow, labeled SL and TP, valid price relationships are required. No signal confidence threshold or OCR recognition score threshold is applied.
+- Only Telegram photos paired with a fresh NEW announcement open positions. Text, image documents, stickers, video and other media cannot open one. Only XAUUSD/XAUUSDT parses; one complete card, direction, entry arrow, labeled SL and TP, valid price relationships are required. No signal confidence threshold or OCR recognition score threshold is applied.
 - Entry is the number **before the arrow**; TP always comes from the `T/P` field. Prices allow thousands spaces. OCR text is parsed directly; missing or ambiguous required fields still reject the image.
 - CoinDCX instrument metadata is discovered at startup. The pair is never assumed to exist. Missing XAU futures or invalid metadata stops startup. A $5 margin trade below exchange quantity/notional minimums is skipped, never rounded up.
-- Market entries must be within 0.50% of the image entry, with SL/TP still on the correct sides of current price. Photos older than 120 seconds are skipped, including during restart catch-up.
-- Exactly one bot position may be active. SHA256 image and normalized signal hashes plus channel/message IDs prevent duplicates persistently.
-- Complete-word `partial`, `booked`, `closed`, or `taken` in a later plain text post closes the full associated position. Replies must reference its source image. Non-replies apply to the current active signal. A close received before fill is persisted until position recovery.
+- Entries use the current market price even when it differs from the image entry. No entry-price-gap filter is applied. SL/TP must still be on the correct sides of current price. Photos older than 20 minutes are skipped, including during restart catch-up.
+- Exactly one bot position may be active. SHA256 image and normalized signal hashes plus channel/message IDs prevent duplicates persistently. Screenshot ticket IDs already associated with a bot trade cannot be traded again, even when the SL or displayed profit changes. Legacy OCR records are included in this check.
+- Complete-word `partial`, `booked`, `closed`, or `taken` in a later text post or photo caption closes the full associated position. Replies must reference its source image. Non-replies apply to the current active signal. A close received before fill is persisted until position recovery.
 - The reference code's HMAC-SHA256 signing and create-order structure are preserved. Orders are market orders for this strategy. SL/TP fields are submitted with entry, then verified against exchange position triggers; missing protection is attached using the documented full-position TP/SL endpoint. Failure to confirm protection causes an emergency exit request. There is an unavoidable interval between fill and protection confirmation.
 - **Keep XAUUSDT exclusive to this bot in this account.** CoinDCX nets positions and reuses a position ID per pair. Existing XAU positions or pending orders block entries. Changed quantity/direction triggers `ISOLATION_CONFLICT` and blocks automated exit rather than closing a mixed position. Same-size external replacement cannot be distinguished reliably; do not manually trade this instrument while the bot owns it.
 - Entry intent is committed before sending an order. Ambiguous requests are never resubmitted. Restart recovery reconciles the stored intent with the exchange. `UNCERTAIN`, `ISOLATION_CONFLICT`, or an unconfirmed `CLOSING` state requires reviewing CoinDCX and the database; the bot blocks new entries. Do not delete the database to clear an unresolved live trade. An exit is sent once, then reconciled; a rejected/uncertain exit needs manual intervention.
 - Daily limits use UTC: 10 entry attempts and a 10 USDT **conservative loss allowance** by default. Each closed trade charges its full configured margin against that allowance, even a winner, because this version does not reconstruct realized PnL, funding and fees from account transactions. This is deliberately more restrictive than realized-PnL counting; it is not an exact daily loss report. Exit price and cause remain unknown when the exchange closes a position independently; the bot records `EXCHANGE_CLOSED` rather than inventing a TP/SL classification.
+
+## NEW announcement required
+
+Every entry requires the whole word **new** in a non-update trading announcement. It may be mixed with other words, such as “New buy guys”, and can be in the photo caption, in a text post before the image, or in a text post after it. `NEW_SIGNAL_WINDOW_SECONDS=1200` bounds association to 20 minutes, and `MAX_SIGNAL_AGE_SECONDS=1200` permits the image to remain pending for that same window. A plain text NEW announcement never opens a position on its own.
+
+An unmarked photo is saved as a pending candidate; it cannot trade unless a matching NEW announcement arrives while fresh. One announcement authorizes at most one accepted image. Pending context survives restart. Only the latest pending image is considered; replies must reference the corresponding image/announcement. Updates, closing keywords, disabled trading and active-position conflicts invalidate pending context.
+
+Captions/OCR marked partial, booked, closed, done, profitable, result, update, again/made, running, or TP/SL hit are not new entries. Negative announcements such as “no new trade” and promotional NEW posts are rejected. A changed SL on a screenshot of an already-traded ticket is an update, even if someone adds NEW to it.
 
 ## Telegram alerts
 
@@ -72,9 +80,9 @@ A startup notification is sent when initialization succeeds. No test trade is ne
 
 ## Persistence and operations
 
-`data/` stores SQLite and downloaded photos; `sessions/` stores Telegram authorization. Back up both and protect them like credentials. Run only one replica. The schema initializes automatically (`PRAGMA user_version=1`) with `signals`, `trades`, `telegram_state`, and `bot_events`; variable exchange/signal fields are held in JSON columns. A partial unique index enforces one active trade. Structured logs omit secrets; Docker logs rotate at 10 MB × 3. Photo/event retention is operator-managed.
+`data/` stores SQLite and downloaded photos; `sessions/` stores Telegram authorization. Back up both and protect them like credentials. Run only one replica. The schema initializes automatically (`PRAGMA user_version=2`) with `signals`, `trades`, `telegram_state`, `bot_events`, and `signal_context`; variable exchange/signal fields are held in JSON columns. A partial unique index enforces one active trade. Structured logs omit secrets; Docker logs rotate at 10 MB × 3. Photo/event retention is operator-managed.
 
-The localhost-only health port reports Telegram connectivity, recent exchange connectivity, DB loop health, mode, active trade state and message offset. Docker health status does not automatically restart an unhealthy process; monitor `review_required` and `degraded` states. Unexpected API errors retain the Telegram offset so processing can retry. Exchange read calls retry with backoff; mutating requests are never blindly retried.
+The localhost-only health port reports Telegram connectivity, recent exchange connectivity, DB loop health, mode, active trade state and message offset. Docker health status does not automatically restart an unhealthy process; monitor `review_required` and `degraded` states. Telegram messages are processed independently of exchange reconciliation errors. Failed message processing is logged and its offset advances; durable entry/exit intents prevent duplicate mutations. Exchange read calls retry with backoff; mutating requests are never blindly retried.
 
 ## Offline checks
 
@@ -90,7 +98,7 @@ API implementation reference: https://docs.coindcx.com/ (futures active instrume
 
 ## Validation completed
 
-All 19 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
+All 49 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
 
 | Image | Side | Entry | SL | TP |
 |---|---|---:|---:|---:|
@@ -98,3 +106,11 @@ All 19 offline checks passed, including OCR on both actual supplied JPGs, accept
 | 2nd.jpg | BUY | 4346.33 | 4325.69 | 4393.02 |
 
 A read-only check of CoinDCX public endpoints found `B-XAU_USDT`, quantity step `0.001`, price tick `0.01`, minimum quantity `0.001`, and minimum notional `6 USDT`. The current quote sized to `0.005` XAU at the configured margin/leverage. These values are discovered again at each startup and can change. Docker was neither installed nor run locally. No test trades or authenticated exchange requests were made.
+
+## September 15 incident fix
+
+The running bot had the order ID but fetched more than 10,000 historical account orders before using it. Recovery hit its 100-page limit, leaving the trade marked SUBMITTED and preventing the old loop from fetching Telegram messages. Recovery now stops at the exact order ID; position queries are filtered to XAUUSDT on the exchange. API error events retain the failing endpoint and HTTP status without exposing credentials.
+
+Close keywords are checked before image extraction, including photo captions. A caption with a close keyword cannot open a new trade. Telegram polling runs before reconciliation, and a reconciliation failure cannot suppress message processing. Earlier messages and replies to unrelated signals cannot close a later trade.
+
+Per the updated entry instruction, market orders have no price-gap filter. `MAX_ENTRY_DEVIATION_PERCENT` is obsolete and ignored if present in an older `.env` file. Actual fill can differ from the historical entry printed in a trade screenshot.

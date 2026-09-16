@@ -3,6 +3,8 @@ import hashlib
 import json
 from dataclasses import dataclass, asdict
 from decimal import Decimal
+from typing import Optional
+from .entry_rules import is_update_text, ticket_from_text
 
 NUMBER = r'\d+(?:[ \u00a0\u202f]\d{3})*(?:\.\d+)?'
 
@@ -13,6 +15,7 @@ class Signal:
     entry: Decimal
     sl: Decimal
     tp: Decimal
+    ticket_id: Optional[str] = None
 
     def data(self):
         return {k: str(v) if isinstance(v, Decimal) else v for k, v in asdict(self).items()}
@@ -20,7 +23,8 @@ class Signal:
     def digest(self):
         # Preserve hashes already stored by the previous version; this legacy value
         # is only part of the hash format and never controls signal acceptance.
-        payload = {**self.data(), 'confidence': 100}
+        payload = {k: v for k, v in self.data().items() if k != 'ticket_id'}
+        payload['confidence'] = 100
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 def number(value):
@@ -31,6 +35,8 @@ def geometry(side, entry, sl, tp):
         sl < entry < tp if side == 'BUY' else tp < entry < sl)
 
 def parse(text):
+    if is_update_text(text):
+        raise ValueError('SIGNAL_REJECTED_UPDATE_IMAGE')
     text = text.upper().replace('\u00a0', ' ').replace('\u202f', ' ')
     symbols = re.findall(r'\bXAU[ /-]*USDT?\b', text)
     sides = re.findall(r'\b(BUY|SELL)\b', text)
@@ -47,7 +53,7 @@ def parse(text):
     entry = field(r'^\s*(' + NUMBER + r')\s*(?:→|➜|⟶|->|-->)\s*' + NUMBER + r'(?![\d.])')
     if not geometry(sides[0], entry, sl, tp):
         raise ValueError('SIGNAL_REJECTED_PRICE_RELATIONSHIP')
-    return Signal('XAUUSDT', sides[0], entry, sl, tp)
+    return Signal('XAUUSDT', sides[0], entry, sl, tp, ticket_from_text(text))
 
 def should_close_from_text(text, keywords=('partial', 'booked', 'closed', 'taken')):
     return any(re.search(r'\b' + re.escape(k) + r'\b', text, re.I) for k in keywords)

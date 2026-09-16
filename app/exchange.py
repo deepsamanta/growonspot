@@ -10,7 +10,14 @@ D = lambda x: Decimal(str(x))
 BASE = 'https://api.coindcx.com/exchange/v1/derivatives/futures/'
 
 class APIError(RuntimeError):
-    pass
+    def __init__(self, message, endpoint=None, http_status=None):
+        super().__init__(message)
+        self.endpoint = endpoint
+        self.http_status = http_status
+
+    def details(self):
+        return {'error_type': type(self).__name__, 'reason': str(self),
+                'endpoint': self.endpoint, 'http_status': self.http_status}
 
 class CoinDCX:
     def __init__(self, config):
@@ -22,7 +29,10 @@ class CoinDCX:
 
     def request(self, path, body=None, read=False, params=None):
         attempts = 3 if read or body is None else 1
+        endpoint = path.split('?')[0]
         for attempt in range(attempts):
+            failure = None
+            retryable = True
             try:
                 url = path if path.startswith('https://') else BASE + path
                 if body is None:
@@ -34,16 +44,24 @@ class CoinDCX:
                         'Content-Type': 'application/json', 'X-AUTH-APIKEY': self.c.key,
                         'X-AUTH-SIGNATURE': signature}, timeout=15)
                 if not response.ok:
-                    raise APIError(f'CoinDCX HTTP {response.status_code} at {path.split("?")[0]}')
-                result = response.json()
-                if isinstance(result, dict) and (result.get('success') is False or str(result.get('status', '')).lower() in ('error', 'failed') or str(result.get('code', '200')).isdigit() and int(result.get('code', 200)) >= 400):
-                    raise APIError('CoinDCX returned an error response')
-                self.last_ok = time.time()
-                return result
-            except (requests.RequestException, ValueError, APIError):
-                if attempt + 1 == attempts:
-                    raise APIError(f'CoinDCX request failed: {path.split("?")[0]}') from None
-                time.sleep(2 ** attempt)
+                    failure = APIError(f'CoinDCX HTTP {response.status_code}', endpoint, response.status_code)
+                    retryable = response.status_code == 429 or response.status_code >= 500
+                else:
+                    result = response.json()
+                    if isinstance(result, dict) and (result.get('success') is False or
+                            str(result.get('status', '')).lower() in ('error', 'failed') or
+                            str(result.get('code', '200')).isdigit() and int(result.get('code', 200)) >= 400):
+                        failure = APIError('CoinDCX returned an error response', endpoint, response.status_code)
+                        retryable = False
+                    else:
+                        self.last_ok = time.time()
+                        return result
+            except (requests.RequestException, ValueError) as error:
+                # Exception messages can contain URLs/credentials; retain only their type.
+                failure = APIError(type(error).__name__, endpoint)
+            if attempt + 1 == attempts or not retryable:
+                raise failure from None
+            time.sleep(2 ** attempt)
 
     def discover(self):
         pairs = self.request('data/active_instruments', params={'margin_currency_short_name[]': 'USDT'})
@@ -96,23 +114,42 @@ class CoinDCX:
             raise ValueError('PROTECTION_PRICE_OUT_OF_RANGE')
         return result
 
-    def rows(self, path, extra=None):
-        result = []
+    def pages(self, path, extra=None):
+        seen = set()
         for page in range(1, 101):
             rows = self.request(path, {'page': str(page), 'size': '100',
                 'margin_currency_short_name': ['USDT'], **(extra or {})}, read=True)
             if not isinstance(rows, list):
-                raise APIError('Unexpected CoinDCX list response')
-            result.extend(rows)
+                raise APIError('Unexpected CoinDCX list response', path)
+            fingerprint = tuple(row.get('id') for row in rows)
+            if rows and fingerprint in seen:
+                raise APIError('Exchange repeated a pagination page', path)
+            seen.add(fingerprint)
+            yield rows
             if len(rows) < 100:
-                return result
-        raise APIError('Pagination exceeded; refusing incomplete exchange state')
+                return
+        raise APIError('Pagination exceeded before required record was found', path)
+
+    def rows(self, path, extra=None):
+        return [row for page in self.pages(path, extra) for row in page]
 
     def positions(self):
-        return [p for p in self.rows('positions') if p['pair'] == self.pair]
+        # CoinDCX keeps hundreds of inactive pair rows. Query only this instrument.
+        return [p for p in self.rows('positions', {'pairs': self.pair}) if p['pair'] == self.pair]
 
     def orders(self, side, status='open,partially_filled,untriggered'):
         return [o for o in self.rows('orders', {'side': side.lower(), 'status': status}) if o['pair'] == self.pair]
+
+    def find_order(self, side, order_id):
+        # Stop immediately on the stored ID instead of exhausting all account history.
+        statuses = 'filled,partially_filled,partially_cancelled,cancelled,open,rejected,untriggered'
+        for page in self.pages('orders', {'side': side.lower(), 'status': statuses}):
+            for order in page:
+                if order.get('id') == order_id:
+                    if order.get('pair') != self.pair or order.get('side') != side.lower():
+                        raise APIError('Stored order does not belong to the expected pair/side', 'orders')
+                    return order
+        return None
 
     def create(self, signal, qty, sl, tp):
         self.request('positions/update_leverage', {'pair': self.pair, 'leverage': self.c.leverage, 'margin_currency_short_name': 'USDT'})

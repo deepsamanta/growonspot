@@ -2,6 +2,7 @@ import sqlite3
 import json
 import time
 from pathlib import Path
+from .entry_rules import ticket_from_text
 
 class Database:
     def __init__(self, path, alerts=None):
@@ -25,7 +26,9 @@ class Database:
             channel INTEGER PRIMARY KEY, last_processed_message_id INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS bot_events (
             id INTEGER PRIMARY KEY, event_type TEXT, data_json TEXT, created_at REAL);
-          PRAGMA user_version=1;
+          CREATE TABLE IF NOT EXISTS signal_context (
+            channel INTEGER PRIMARY KEY, data_json TEXT NOT NULL);
+          PRAGMA user_version=2;
         ''')
 
     def event(self, kind, **data):
@@ -83,3 +86,25 @@ class Database:
         count = self.conn.execute("SELECT count(*) FROM trades WHERE opened_at>=? AND status!='REJECTED'", (start,)).fetchone()[0]
         loss = self.conn.execute('SELECT coalesce(sum(loss_charge),0) FROM trades WHERE closed_at>=?', (start,)).fetchone()[0]
         return count, loss
+
+    def has_traded_ticket(self, channel, ticket_id):
+        if not ticket_id:
+            return False
+        rows = self.conn.execute("""SELECT signals.data_json FROM signals
+            JOIN trades ON trades.signal_id=signals.id
+            WHERE signals.channel=? AND trades.status!='REJECTED'""", (channel,))
+        for row in rows:
+            data = json.loads(row[0])
+            existing = data.get('ticket_id') or ticket_from_text(data.get('raw_ocr_text', ''))
+            if existing == ticket_id:
+                return True
+        return False
+
+    def context(self, channel):
+        row = self.conn.execute('SELECT data_json FROM signal_context WHERE channel=?', (channel,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def save_context(self, channel, data):
+        self.conn.execute('INSERT INTO signal_context VALUES(?,?) ON CONFLICT(channel) DO UPDATE SET data_json=excluded.data_json',
+                          (channel, json.dumps(data)))
+        self.conn.commit()

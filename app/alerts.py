@@ -7,6 +7,11 @@ import requests
 
 PREFIX = '[XAU BOT]'
 EVENTS = {
+    'SIGNAL_DUPLICATE_TICKET': 'Update ignored: this trade ticket was already traded',
+    'CLOSE_KEYWORD_DETECTED': 'Close instruction received from Telegram',
+    'MESSAGE_PROCESSING_ERROR': 'Message processing failed; review logs',
+    'TELEGRAM_POLL_ERROR': 'Telegram reading failed; retrying',
+    'RECONCILIATION_ERROR': 'Exchange reconciliation failed; Telegram processing continues',
     'BOT_STARTED': 'Monitoring started',
     'BOT_FATAL': 'Bot stopped with an error; review VPS logs',
     'ORDER_SUBMITTED': 'Entry submitted; fill not yet confirmed',
@@ -20,7 +25,6 @@ EVENTS = {
     'EXIT_REQUEST_FAILED': 'Exit failed or outcome uncertain; review CoinDCX immediately',
     'EXIT_UNCONFIRMED': 'Position remains open after exit request; manual review required',
     'DAILY_LIMIT_REACHED': 'Trade skipped: daily limit reached',
-    'ENTRY_SKIPPED_PRICE_DEVIATION': 'Trade skipped: market too far from signal entry',
     'EXTERNAL_POSITION_BLOCKS_ENTRY': 'Trade skipped: existing XAU position',
     'EXTERNAL_ORDER_BLOCKS_ENTRY': 'Trade skipped: existing XAU order',
     'TRADING_DISABLED': 'Trade skipped: entries disabled in configuration',
@@ -29,7 +33,7 @@ EVENTS = {
     'WOULD_OPEN': 'DRY RUN: simulated entry only',
 }
 FIELDS = ('trade_id', 'message_id', 'order_id', 'side', 'quantity', 'actual_fill_price',
-          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type')
+          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type', 'endpoint', 'http_status', 'ticket_id')
 
 class TelegramAlerts:
     def __init__(self, token, chat_id, start_worker=True):

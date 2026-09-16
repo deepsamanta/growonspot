@@ -16,6 +16,8 @@ class Exchange:
     def orders(self, side, status=None):
         return [{'id': 'order', 'status': 'filled', 'total_quantity': '0.005',
                  'remaining_quantity': 0, 'cancelled_quantity': 0}] if status else []
+    def find_order(self, side, order_id):
+        return self.orders(side, 'filled')[0]
     def protect(self, p, sl, tp):
         p.update(stop_loss_trigger=str(sl), take_profit_trigger=str(tp))
         self.protected = True

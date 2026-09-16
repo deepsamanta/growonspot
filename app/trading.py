@@ -26,9 +26,6 @@ class Trader:
             self.db.event('EXTERNAL_ORDER_BLOCKS_ENTRY')
             return
         price = self.ex.price(signal.side)
-        if abs(price - signal.entry) / signal.entry * 100 > self.c.deviation:
-            self.db.event('ENTRY_SKIPPED_PRICE_DEVIATION')
-            return
         qty = self.ex.size(price)
         sl, tp = self.ex.tick(signal.sl), self.ex.tick(signal.tp)
         if not geometry(signal.side, price, sl, tp):
@@ -83,11 +80,13 @@ class Trader:
         p = positions[0]
         if not d.get('position_id'):
             # Confirm entry ownership from its exchange order before adopting a net position.
-            orders = self.ex.orders(d['side'], 'filled,partially_filled,partially_cancelled,cancelled,open,rejected')
-            candidates = [o for o in orders if (
-                o['id'] == d['exchange_order_id'] if d.get('exchange_order_id') else
-                D(o['total_quantity']) == D(d['quantity']) and
-                float(o['created_at']) / 1000 >= d['submitted_at'] - 2)]
+            if d.get('exchange_order_id'):
+                order = self.ex.find_order(d['side'], d['exchange_order_id'])
+                candidates = [order] if order is not None else []
+            else:
+                orders = self.ex.orders(d['side'], 'filled,partially_filled,partially_cancelled,cancelled,open,rejected')
+                candidates = [o for o in orders if D(o['total_quantity']) == D(d['quantity']) and
+                              float(o['created_at']) / 1000 >= d['submitted_at'] - 2]
             if len(candidates) != 1:
                 self.db.update(trade, 'UNCERTAIN')
                 self.db.event('ORDER_UNCERTAIN_REQUIRES_REVIEW', trade_id=trade['id'])
@@ -148,12 +147,13 @@ class Trader:
         if not trade or (reply_to is not None and reply_to != trade['data']['message_id']):
             return
         d = trade['data']
+        self.db.update(trade, trade['status'], exit_reason=reason)
+        trade = self.db.active()
         if trade['status'] in ('CLOSING', 'ISOLATION_CONFLICT'):
             return
         if d['dry']:
             self.db.close(trade, reason, D(d['margin']))
             return
-        self.db.update(trade, trade['status'], exit_reason=reason)
         positions = [p for p in self.ex.positions() if D(p['active_pos']) != 0]
         if not positions or not d.get('position_id'):
             return  # Persisted close intent is applied after pending entry recovery.

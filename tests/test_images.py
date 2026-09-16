@@ -19,6 +19,7 @@ class ImageTests(unittest.TestCase):
         for name, side, entry, sl, tp in [
             ('short_signal.jpg', 'SELL', '4336.09', '4338.77', '4289.31'),
             ('long_signal.jpg', 'BUY', '4346.33', '4325.69', '4393.02'),
+            ('incident_signal.jpg', 'SELL', '4292.13', '4307.92', '4257.24'),
         ]:
             signal, _ = extract_image(Path(__file__).parent / 'fixtures' / name)
             self.assertEqual(signal.symbol, 'XAUUSDT')
