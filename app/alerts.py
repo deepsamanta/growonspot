@@ -7,6 +7,11 @@ import requests
 
 PREFIX = '[XAU BOT]'
 EVENTS = {
+    'REVERSAL_REQUESTED': 'Opposite signal: closing current position before new entry',
+    'ADD_ORDER_SUBMITTED': 'Same-side entry submitted; fill not yet confirmed',
+    'POSITION_ADDED': 'Same-side entry filled; applying newest SL/TP to combined position',
+    'ADD_ORDER_REJECTED': 'Additional entry did not fill; existing position retained',
+    'PENDING_SIGNAL_EXPIRED': 'Pending signal expired before it could be executed',
     'SIGNAL_DUPLICATE_TICKET': 'Update ignored: this trade ticket was already traded',
     'CLOSE_KEYWORD_DETECTED': 'Close instruction received from Telegram',
     'MESSAGE_PROCESSING_ERROR': 'Message processing failed; review logs',
@@ -33,7 +38,7 @@ EVENTS = {
     'WOULD_OPEN': 'DRY RUN: simulated entry only',
 }
 FIELDS = ('trade_id', 'message_id', 'order_id', 'side', 'quantity', 'actual_fill_price',
-          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type', 'endpoint', 'http_status', 'ticket_id')
+          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type', 'endpoint', 'http_status', 'ticket_id', 'total_quantity')
 
 class TelegramAlerts:
     def __init__(self, token, chat_id, start_worker=True):

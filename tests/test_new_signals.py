@@ -47,6 +47,20 @@ class NewSignalTests(unittest.IsolatedAsyncioTestCase):
         self.trader.enter.assert_not_called()
         await self.processor.process(self.message(11,'This is a NEW buy'))
         self.trader.enter.assert_called_once()
+    async def test_new_signal_is_processed_while_existing_trade_is_open(self):
+        sid = self.db.signal(self.c.channel, 1, 'first', 'first', {'raw_ocr_text': CARD})
+        self.db.reserve(sid, {'message_id': 1})
+        self.db.update(self.db.active(), 'OPEN')
+        fresh = CARD.replace('2025944568', '2025944569')
+        self.ocr_mock.return_value = (parse(fresh), fresh)
+        await self.processor.process(self.message(10, 'New buy', True))
+        self.trader.enter.assert_called_once()
+    async def test_old_ticket_cannot_add_while_open(self):
+        sid = self.db.signal(self.c.channel, 1, 'first', 'first', {'raw_ocr_text': CARD})
+        self.db.reserve(sid, {'message_id': 1})
+        self.db.update(self.db.active(), 'OPEN')
+        await self.processor.process(self.message(10, 'New buy', True))
+        self.trader.enter.assert_not_called()
     async def test_image_alone_never_opens(self):
         await self.processor.process(self.message(10,photo=True))
         self.trader.enter.assert_not_called()
@@ -148,6 +162,6 @@ class EntryTextTests(unittest.TestCase):
     def test_status_with_valid_card_rejected(self):
         for text in ['Closed', 'Partial book', 'TP hit', 'Already profitable']:
             with self.assertRaises(ValueError):parse(CARD+'\n'+text)
-    def test_ticket_extracted_and_hash_compatible(self):
+    def test_distinct_tickets_with_identical_prices_have_distinct_hashes(self):
         self.assertEqual(parse(CARD).ticket_id,'2025944568')
-        self.assertEqual(parse(CARD).digest(),parse(CARD.replace('#2025944568\n','')).digest())
+        self.assertNotEqual(parse(CARD).digest(),parse(CARD.replace('2025944568','2025944569')).digest())

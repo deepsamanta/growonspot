@@ -21,10 +21,12 @@ class Signal:
         return {k: str(v) if isinstance(v, Decimal) else v for k, v in asdict(self).items()}
 
     def digest(self):
-        # Preserve hashes already stored by the previous version; this legacy value
-        # is only part of the hash format and never controls signal acceptance.
+        # Keep the legacy no-ticket hash format. Distinct source tickets may have
+        # identical prices; ticket history separately blocks updates to old trades.
         payload = {k: v for k, v in self.data().items() if k != 'ticket_id'}
         payload['confidence'] = 100
+        if self.ticket_id:
+            payload['ticket_id'] = self.ticket_id
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 def number(value):

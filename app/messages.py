@@ -34,7 +34,8 @@ class MessageProcessor:
             await self.clear_context(message.id)
             trade = await self.worker(self.db.active)
             if trade and message.id > trade['data']['message_id']:
-                if message.reply_to_msg_id is not None and message.reply_to_msg_id != trade['data']['message_id']:
+                message_ids = await self.worker(self.db.message_ids, trade)
+                if message.reply_to_msg_id is not None and message.reply_to_msg_id not in message_ids:
                     await self.event('CLOSE_KEYWORD_IGNORED_UNRELATED_REPLY', message_id=message.id, trade_id=trade['id'])
                     return
                 keyword = next(k for k in self.c.keywords if should_close_from_text(text, (k,)))
@@ -42,6 +43,8 @@ class MessageProcessor:
                                  reason='TELEGRAM_' + keyword.upper())
                 await self.worker(self.trader.close, 'TELEGRAM_' + keyword.upper(), message.reply_to_msg_id)
             else:
+                if message.reply_to_msg_id is None:
+                    await self.worker(self.db.cancel_pending)
                 await self.event('CLOSE_KEYWORD_IGNORED_NO_MATCHING_TRADE', message_id=message.id)
             return
         if is_update_text(text):
@@ -54,10 +57,6 @@ class MessageProcessor:
         if not self.c.enabled:
             await self.clear_context(message.id)
             await self.event('TRADING_DISABLED', message_id=message.id)
-            return
-        if await self.worker(self.db.active):
-            await self.clear_context(message.id)
-            await self.event('SIGNAL_IGNORED_ACTIVE_POSITION', message_id=message.id)
             return
         now = time.time()
         sent_at = message.date.timestamp()
@@ -118,6 +117,7 @@ class MessageProcessor:
                 await self.retain_later_marker(candidate, marker)
                 return
             data = {**signal.data(), 'raw_ocr_text': raw, 'image_path': str(path),
+                    'source_sent_at': candidate['sent_at'],
                     'reply_to_message_id': candidate['reply_to'], 'new_announcement_message_id': marker['message_id']}
             image_hash = hashlib.sha256(path.read_bytes()).hexdigest()
             signal_id = await self.worker(self.db.signal, self.c.channel, message_id, image_hash, signal.digest(), data)

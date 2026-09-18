@@ -1,6 +1,6 @@
 import time
 from decimal import Decimal
-from .signals import geometry
+from .signals import geometry, Signal
 from .exchange import D
 
 class Trader:
@@ -8,28 +8,66 @@ class Trader:
         self.c, self.db, self.ex = config, db, exchange
 
     def enter(self, signal_id, message_id, signal):
-        if self.db.active():
-            self.db.event('SIGNAL_IGNORED_ACTIVE_POSITION')
+        self.db.enqueue(signal_id, message_id, signal.data())
+        self.reconcile()
+
+    def process_pending(self):
+        pending = self.db.pending()
+        if not pending:
+            return
+        signal_id, message_id = pending['signal_id'], pending['message_id']
+        if time.time() - pending['created_at'] > getattr(self.c, 'max_age', 1200):
+            self.db.finish_pending(signal_id)
+            self.db.event('PENDING_SIGNAL_EXPIRED', message_id=message_id)
             return
         if not self.c.enabled:
+            self.db.finish_pending(signal_id)
             self.db.event('TRADING_DISABLED')
+            return
+        trade = self.db.active()
+        if trade and (trade['status'] != 'OPEN' or trade['data'].get('exit_reason')):
             return
         count, loss = self.db.daily()
         if count >= self.c.daily_trades or D(loss) >= self.c.daily_loss:
+            self.db.finish_pending(signal_id)
             self.db.event('DAILY_LIMIT_REACHED')
             return
+        data = pending['data']
+        signal = Signal(data['symbol'], data['side'], D(data['entry']), D(data['sl']), D(data['tp']), data.get('ticket_id'))
+        try:
+            price = self.ex.price(signal.side)
+            qty = self.ex.size(price)
+            sl, tp = self.ex.tick(signal.sl), self.ex.tick(signal.tp)
+            if not geometry(signal.side, price, sl, tp):
+                raise ValueError('SL_TP_INVALID_AT_CURRENT_MARKET')
+        except ValueError as error:
+            self.db.finish_pending(signal_id)
+            self.db.event('SIGNAL_REJECTED', message_id=message_id, reason=str(error))
+            return
+        if trade:
+            if trade['data']['side'] != signal.side:
+                self.db.event('REVERSAL_REQUESTED', trade_id=trade['id'], message_id=message_id, side=signal.side)
+                self.close('SIGNAL_REVERSAL')
+                # Confirm flat before placing the opposite order; delayed exits are
+                # resumed from the durable queue by the next polling cycle.
+                self._reconcile()
+                if not self.db.active():
+                    self.process_pending()
+                return
+            self.add(trade, signal_id, message_id, signal, price, qty, sl, tp)
+            return
+        self.open_new(signal_id, message_id, signal, price, qty, sl, tp)
+
+    def open_new(self, signal_id, message_id, signal, price, qty, sl, tp):
         positions = self.ex.positions()
         if any(D(p['active_pos']) != 0 or D(p.get('inactive_pos_buy', 0)) != 0 or D(p.get('inactive_pos_sell', 0)) != 0 for p in positions):
+            self.db.finish_pending(signal_id)
             self.db.event('EXTERNAL_POSITION_BLOCKS_ENTRY')
             return
         if self.ex.orders('BUY') or self.ex.orders('SELL'):
+            self.db.finish_pending(signal_id)
             self.db.event('EXTERNAL_ORDER_BLOCKS_ENTRY')
             return
-        price = self.ex.price(signal.side)
-        qty = self.ex.size(price)
-        sl, tp = self.ex.tick(signal.sl), self.ex.tick(signal.tp)
-        if not geometry(signal.side, price, sl, tp):
-            raise ValueError('SL_TP_INVALID_AT_CURRENT_MARKET')
         data = {**signal.data(), 'message_id': message_id, 'pair': self.ex.pair,
                 'quantity': str(qty), 'sl': str(sl), 'tp': str(tp),
                 'leverage': self.c.leverage, 'margin': str(self.c.margin), 'dry': self.c.dry,
@@ -46,7 +84,96 @@ class Trader:
             self.db.event('ORDER_SUBMITTED', trade_id=trade['id'], order_id=order_id)
         except Exception:
             self.db.update(trade, 'UNCERTAIN')
-        self.reconcile()
+        self._reconcile()
+
+    def add(self, trade, signal_id, message_id, signal, price, qty, sl, tp):
+        positions = [p for p in self.ex.positions() if D(p['active_pos']) != 0]
+        if not self.c.dry and (len(positions) != 1 or not self.ownership(trade, positions[0])):
+            self.db.update(trade, 'ISOLATION_CONFLICT')
+            return
+        # Only the bot's current full-position SL/TP orders may coexist with an add.
+        # Unrelated working orders must never be silently adopted or cancelled.
+        for side in ('BUY', 'SELL'):
+            for order in self.ex.orders(side):
+                expected_side = 'sell' if signal.side == 'BUY' else 'buy'
+                expected = trade['data']['sl'] if order.get('order_type') == 'stop_market' else trade['data']['tp']
+                if not (order.get('stage') == 'tpsl_exit' and order.get('status') == 'untriggered'
+                        and order.get('side') == expected_side
+                        and order.get('order_type') in ('stop_market', 'take_profit_market')
+                        and D(order.get('stop_price') or 0) == D(expected)):
+                    self.db.finish_pending(signal_id)
+                    self.db.event('EXTERNAL_ORDER_BLOCKS_ENTRY', message_id=message_id)
+                    return
+        data = {**signal.data(), 'message_id': message_id, 'quantity': str(qty),
+                'sl': str(sl), 'tp': str(tp), 'margin': str(self.c.margin),
+                'submitted_at': time.time(), 'market_price': str(price)}
+        self.db.reserve_addition(trade, signal_id, data)
+        addition = self.db.pending_addition(trade)
+        if self.c.dry:
+            self.finish_addition(trade, addition, qty, price)
+            self.db.update(self.db.active(), 'OPEN')
+        else:
+            try:
+                order_id = self.ex.create(signal, qty, sl, tp)
+                self.db.update_addition(addition, 'SUBMITTED', exchange_order_id=order_id)
+                self.db.event('ADD_ORDER_SUBMITTED', trade_id=trade['id'], message_id=message_id, order_id=order_id)
+            except Exception:
+                self.db.update_addition(addition, 'UNCERTAIN')
+                self.db.update(self.db.active(), 'UNCERTAIN')
+        self._reconcile()
+
+    def finish_addition(self, trade, addition, filled, fill_price):
+        d, a = trade['data'], addition['data']
+        quantity = D(d['quantity']) + filled
+        self.db.apply_addition(trade, addition,
+            {**d, 'quantity': str(quantity), 'margin': str(D(d['margin']) + D(a['margin'])),
+             'sl': a['sl'], 'tp': a['tp'], 'open_alerted': False},
+            {'filled_quantity': str(filled), 'actual_fill_price': str(fill_price)})
+        self.db.event('POSITION_ADDED', trade_id=trade['id'], message_id=a['message_id'],
+                      side=d['side'], quantity=str(filled), total_quantity=str(quantity),
+                      actual_fill_price=str(fill_price), sl=a['sl'], tp=a['tp'], margin=a['margin'])
+
+    def reconcile_addition(self, trade, addition, positions):
+        a = addition['data']
+        if trade['status'] == 'ISOLATION_CONFLICT':
+            return False
+        if not a.get('exchange_order_id'):
+            self.db.update(trade, 'UNCERTAIN')
+            return False  # Never infer acknowledgement from an existing net position.
+        order = self.ex.find_order(trade['data']['side'], a['exchange_order_id'])
+        if order is None:
+            self.db.update(trade, 'UNCERTAIN')
+            return False
+        if order['status'] not in ('filled', 'cancelled', 'partially_cancelled', 'rejected'):
+            if not a.get('cancel_requested'):
+                self.db.update_addition(addition, 'SUBMITTED', cancel_requested=True)
+                self.ex.cancel(order['id'])
+            if time.time() - a['submitted_at'] > 60:
+                self.db.update(trade, 'UNCERTAIN')
+            return False
+        filled = D(order['total_quantity']) - D(order['remaining_quantity']) - D(order.get('cancelled_quantity', 0))
+        if filled == 0:
+            self.db.update_addition(addition, 'REJECTED')
+            self.db.update(trade, 'PROTECTING')
+            self.db.event('ADD_ORDER_REJECTED', trade_id=trade['id'], message_id=a['message_id'])
+            return True
+        expected = (D(trade['data']['quantity']) + filled) * (1 if trade['data']['side'] == 'BUY' else -1)
+        # Order and position endpoints can briefly disagree during fill settlement.
+        # Re-read after the terminal order; never permanently flag a normal lag.
+        positions[:] = [p for p in self.ex.positions() if D(p['active_pos']) != 0]
+        if (0 < filled <= D(a['quantity']) and len(positions) == 1
+                and positions[0]['id'] == trade['data']['position_id']):
+            actual = D(positions[0]['active_pos']) * (1 if trade['data']['side'] == 'BUY' else -1)
+            if D(trade['data']['quantity']) <= actual < abs(expected):
+                if time.time() - a['submitted_at'] > 60:
+                    self.db.update(trade, 'UNCERTAIN')
+                return False
+        if (filled < 0 or filled > D(a['quantity']) or len(positions) != 1
+                or positions[0]['id'] != trade['data']['position_id'] or D(positions[0]['active_pos']) != expected):
+            self.db.update(trade, 'ISOLATION_CONFLICT')
+            return False
+        self.finish_addition(trade, addition, filled, order['avg_price'])
+        return True
 
     def ownership(self, trade, position):
         d = trade['data']
@@ -55,6 +182,10 @@ class Trader:
         return signed == expected and (not d.get('position_id') or d['position_id'] == position['id'])
 
     def reconcile(self):
+        self._reconcile()
+        self.process_pending()
+
+    def _reconcile(self):
         trade = self.db.active()
         if not trade:
             self.ex.positions()  # API heartbeat even while idle.
@@ -66,6 +197,12 @@ class Trader:
                 self.db.close(trade, 'DRY_SL_OR_TP', D(d['margin']))
             return
         positions = [p for p in self.ex.positions() if D(p['active_pos']) != 0]
+        addition = self.db.pending_addition(trade)
+        if addition:
+            if not self.reconcile_addition(trade, addition, positions):
+                return
+            trade = self.db.active()
+            d = trade['data']
         if len(positions) > 1:
             self.db.update(trade, 'ISOLATION_CONFLICT')
             return
@@ -144,13 +281,19 @@ class Trader:
 
     def close(self, reason, reply_to=None):
         trade = self.db.active()
-        if not trade or (reply_to is not None and reply_to != trade['data']['message_id']):
+        if reply_to is not None and (not trade or reply_to not in self.db.message_ids(trade)):
+            return
+        if reason != 'SIGNAL_REVERSAL':
+            self.db.cancel_pending()
+        if not trade:
             return
         d = trade['data']
         self.db.update(trade, trade['status'], exit_reason=reason)
         trade = self.db.active()
         if trade['status'] in ('CLOSING', 'ISOLATION_CONFLICT'):
             return
+        if self.db.pending_addition(trade):
+            return  # Reconcile the added fill before issuing one full-position exit.
         if d['dry']:
             self.db.close(trade, reason, D(d['margin']))
             return
