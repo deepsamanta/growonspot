@@ -6,13 +6,30 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from app.database import Database
-from app.exchange import APIError, CoinDCX, EntryNotSubmitted
+from app.exchange import APIError, CoinDCX, EntryNotSubmitted, OrderRejected
 from app.messages import MessageProcessor, run_cycle
 from app.signals import parse
 from app.trading import Trader
 
 
 class ExchangeLookupTests(unittest.TestCase):
+    def test_explicit_http_order_rejections_are_terminal(self):
+        for status in (400,401,404,422):
+            with self.subTest(status=status):
+                ex=CoinDCX(SimpleNamespace(leverage=5))
+                ex.request=Mock(side_effect=[{},APIError('Rejected','orders/create',status)])
+                with self.assertRaises(OrderRejected):
+                    ex.create(SimpleNamespace(side='BUY'),D('.005'),D(4200),D(4400))
+                self.assertEqual(ex.request.call_count,2)
+    def test_server_rate_limit_and_timeout_errors_are_not_assumed_rejected(self):
+        for status in (None,408,429,500,503,504):
+            with self.subTest(status=status):
+                ex=CoinDCX(SimpleNamespace(leverage=5))
+                ex.request=Mock(side_effect=[{},APIError('Unknown outcome','orders/create',status)])
+                with self.assertRaises(APIError) as caught:
+                    ex.create(SimpleNamespace(side='BUY'),D('.005'),D(4200),D(4400))
+                self.assertNotIsInstance(caught.exception,(OrderRejected,EntryNotSubmitted))
+                self.assertEqual(ex.request.call_count,2)
     def test_leverage_failure_is_distinct_from_uncertain_order_submission(self):
         ex=CoinDCX(SimpleNamespace(leverage=5))
         ex.request=Mock(side_effect=APIError('HTTP 400','positions/update_leverage',400))

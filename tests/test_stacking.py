@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from app.database import Database
 from app.signals import Signal
 from app.trading import Trader
-from app.exchange import EntryNotSubmitted
+from app.exchange import EntryNotSubmitted, OrderRejected
 
 
 class NettedExchange:
@@ -223,6 +223,26 @@ class StackingTests(unittest.TestCase):
         self.assertEqual(self.db.active()['status'],'OPEN')
         self.assertEqual(D(self.db.active()['data']['quantity']),D('.005'))
         self.assertEqual(self.db.daily(),(1,0))
+    def test_explicit_rejection_allows_next_fresh_signal_after_restart(self):
+        create=self.ex.create
+        def fail(*args): raise OrderRejected('Rejected','orders/create',400)
+        self.ex.create=fail
+        self.enter()
+        self.restart()
+        self.assertIsNone(self.db.active())
+        self.ex.create=create
+        self.enter()
+        self.assertEqual(self.db.active()['status'],'OPEN')
+        self.assertEqual(len(self.ex.calls),1)
+    def test_explicit_add_rejection_keeps_original_position(self):
+        self.enter()
+        def fail(*args): raise OrderRejected('Rejected','orders/create',422)
+        self.ex.create=fail
+        self.enter()
+        self.restart()
+        self.trader.reconcile()
+        self.assertEqual(self.db.active()['status'],'OPEN')
+        self.assertEqual(D(self.db.active()['data']['quantity']),D('.005'))
     def test_bot_full_position_protection_does_not_block_add(self):
         self.enter()
         self.ex.extra_orders=[{'id':'sl','stage':'tpsl_exit','status':'untriggered',

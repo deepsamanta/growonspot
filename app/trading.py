@@ -1,7 +1,7 @@
 import time
 from decimal import Decimal
 from .signals import geometry, Signal
-from .exchange import D, APIError, EntryNotSubmitted
+from .exchange import D, APIError, EntryNotSubmitted, OrderRejected
 
 class Trader:
     def __init__(self, config, db, exchange):
@@ -82,9 +82,9 @@ class Trader:
             order_id = self.ex.create(signal, qty, sl, tp)
             self.db.update(trade, 'SUBMITTED', exchange_order_id=order_id)
             self.db.event('ORDER_SUBMITTED', trade_id=trade['id'], order_id=order_id)
-        except EntryNotSubmitted as error:
+        except (EntryNotSubmitted, OrderRejected) as error:
             self.db.update(trade, 'REJECTED', failure=error.details())
-            self.db.event('ENTRY_NOT_SUBMITTED', trade_id=trade['id'], **error.details())
+            self.db.event('ENTRY_REJECTED' if isinstance(error, OrderRejected) else 'ENTRY_NOT_SUBMITTED', trade_id=trade['id'], **error.details())
         except Exception as error:
             self.db.event('ENTRY_SUBMISSION_FAILED', trade_id=trade['id'],
                           **(error.details() if isinstance(error, APIError) else {'error_type': type(error).__name__}))
@@ -122,10 +122,10 @@ class Trader:
                 order_id = self.ex.create(signal, qty, sl, tp)
                 self.db.update_addition(addition, 'SUBMITTED', exchange_order_id=order_id)
                 self.db.event('ADD_ORDER_SUBMITTED', trade_id=trade['id'], message_id=message_id, order_id=order_id)
-            except EntryNotSubmitted as error:
+            except (EntryNotSubmitted, OrderRejected) as error:
                 self.db.update_addition(addition, 'REJECTED', failure=error.details())
                 self.db.update(self.db.active(), 'OPEN')
-                self.db.event('ENTRY_NOT_SUBMITTED', trade_id=trade['id'], message_id=message_id, **error.details())
+                self.db.event('ENTRY_REJECTED' if isinstance(error, OrderRejected) else 'ENTRY_NOT_SUBMITTED', trade_id=trade['id'], message_id=message_id, **error.details())
             except Exception as error:
                 self.db.event('ENTRY_SUBMISSION_FAILED', trade_id=trade['id'], message_id=message_id,
                               **(error.details() if isinstance(error, APIError) else {'error_type': type(error).__name__}))
@@ -286,7 +286,8 @@ class Trader:
         if trade['status'] == 'ISOLATION_CONFLICT':
             return  # Manual review required after any unexpected account modification.
         if trade['status'] == 'CLOSING':
-            if time.time() - d.get('close_requested_at', 0) > 30:
+            if time.time() - d.get('close_requested_at', 0) > 30 and not d.get('exit_unconfirmed_alerted'):
+                self.db.update(trade, 'CLOSING', exit_unconfirmed_alerted=True)
                 self.db.event('EXIT_UNCONFIRMED', trade_id=trade['id'])
             return  # Never repeat an uncertain exit and risk affecting a subsequent position.
         self.db.update(trade, 'PROTECTING', **{**d, 'position_id': p['id'], 'actual_fill_price': str(p['avg_price'])})

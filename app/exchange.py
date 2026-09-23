@@ -22,6 +22,9 @@ class APIError(RuntimeError):
 class EntryNotSubmitted(APIError):
     """Preparation failed before the order-create request was attempted."""
 
+class OrderRejected(APIError):
+    """The order endpoint explicitly rejected the request without accepting it."""
+
 class CoinDCX:
     def __init__(self, config):
         self.c = config
@@ -160,12 +163,20 @@ class CoinDCX:
         except APIError as error:
             raise EntryNotSubmitted(str(error), error.endpoint, error.http_status) from None
         # Keep the reference bot's SL/TP fields; also verify exchange-side protection after fill.
-        result = self.request('orders/create', {'order': {
-            'side': signal.side.lower(), 'pair': self.pair, 'order_type': 'market_order',
-            'price': None, 'total_quantity': float(qty), 'leverage': self.c.leverage,
-            'take_profit_price': float(tp), 'stop_loss_price': float(sl),
-            'notification': 'no_notification', 'margin_currency_short_name': 'USDT',
-            'position_margin_type': 'isolated'}})
+        try:
+            result = self.request('orders/create', {'order': {
+                'side': signal.side.lower(), 'pair': self.pair, 'order_type': 'market_order',
+                'price': None, 'total_quantity': float(qty), 'leverage': self.c.leverage,
+                'take_profit_price': float(tp), 'stop_loss_price': float(sl),
+                'notification': 'no_notification', 'margin_currency_short_name': 'USDT',
+                'position_margin_type': 'isolated'}})
+        except APIError as error:
+            # Documented invalid-request/auth/not-found/validation rejections.
+            # Timeouts, rate limits and server failures remain uncertain.
+            if error.http_status in (400, 401, 404, 422):
+                raise OrderRejected(str(error), error.endpoint, error.http_status) from None
+            raise
+
         rows = result if isinstance(result, list) else result.get('order', [])
         if isinstance(rows, dict):
             rows = [rows]

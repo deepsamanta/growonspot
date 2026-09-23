@@ -7,6 +7,7 @@ import requests
 
 PREFIX = '[XAU BOT]'
 EVENTS = {
+    'ENTRY_REJECTED': 'CoinDCX rejected the entry; no new position opened',
     'ENTRY_NOT_SUBMITTED': 'Entry preparation failed; no new order was submitted',
     'ENTRY_NOT_FILLED': 'Entry ended without a fill; monitoring continues',
     'ENTRY_SUBMISSION_FAILED': 'Entry submission error; checking outcome before allowing new trades',

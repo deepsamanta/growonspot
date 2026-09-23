@@ -81,3 +81,26 @@ class LifecycleTests(unittest.TestCase):
         for _ in range(5): self.trader.reconcile()
         self.assertEqual(self.db.active()['status'], 'UNCERTAIN')
         self.assertEqual(before,self.db.conn.execute('SELECT count(*) FROM bot_events').fetchone()[0])
+    def test_unconfirmed_exit_alerts_once_across_restart_without_resubmission(self):
+        self.trader.reconcile()
+        self.trader.close('TELEGRAM_PARTIAL')
+        self.db.update(self.db.active(),'CLOSING',close_requested_at=1)
+        for _ in range(5): self.trader.reconcile()
+        self.db.conn.close()
+        self.db=Database(self.tmp.name+'/db')
+        self.trader=Trader(None,self.db,self.ex)
+        self.trader.reconcile()
+        count=self.db.conn.execute("SELECT count(*) FROM bot_events WHERE event_type='EXIT_UNCONFIRMED'").fetchone()[0]
+        self.assertEqual(count,1)
+        self.assertEqual(self.ex.exit_calls,['position'])
+    def test_flat_with_working_entry_is_not_cleared(self):
+        self.ex.pos=[]
+        self.ex.find_order=lambda *args: {'id':'order','status':'open'}
+        self.trader.reconcile()
+        self.assertIsNotNone(self.db.active())
+    def test_flat_recovery_rechecks_exchange_before_closing_record(self):
+        position=self.ex.pos
+        calls=iter([[],position])
+        self.ex.positions=lambda: next(calls)
+        self.trader.reconcile()
+        self.assertIsNotNone(self.db.active())
