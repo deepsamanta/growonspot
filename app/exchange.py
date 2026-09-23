@@ -19,6 +19,9 @@ class APIError(RuntimeError):
         return {'error_type': type(self).__name__, 'reason': str(self),
                 'endpoint': self.endpoint, 'http_status': self.http_status}
 
+class EntryNotSubmitted(APIError):
+    """Preparation failed before the order-create request was attempted."""
+
 class CoinDCX:
     def __init__(self, config):
         self.c = config
@@ -152,7 +155,10 @@ class CoinDCX:
         return None
 
     def create(self, signal, qty, sl, tp):
-        self.request('positions/update_leverage', {'pair': self.pair, 'leverage': self.c.leverage, 'margin_currency_short_name': 'USDT'})
+        try:
+            self.request('positions/update_leverage', {'pair': self.pair, 'leverage': self.c.leverage, 'margin_currency_short_name': 'USDT'})
+        except APIError as error:
+            raise EntryNotSubmitted(str(error), error.endpoint, error.http_status) from None
         # Keep the reference bot's SL/TP fields; also verify exchange-side protection after fill.
         result = self.request('orders/create', {'order': {
             'side': signal.side.lower(), 'pair': self.pair, 'order_type': 'market_order',

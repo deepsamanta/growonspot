@@ -1,7 +1,7 @@
 import time
 from decimal import Decimal
 from .signals import geometry, Signal
-from .exchange import D
+from .exchange import D, APIError, EntryNotSubmitted
 
 class Trader:
     def __init__(self, config, db, exchange):
@@ -82,7 +82,12 @@ class Trader:
             order_id = self.ex.create(signal, qty, sl, tp)
             self.db.update(trade, 'SUBMITTED', exchange_order_id=order_id)
             self.db.event('ORDER_SUBMITTED', trade_id=trade['id'], order_id=order_id)
-        except Exception:
+        except EntryNotSubmitted as error:
+            self.db.update(trade, 'REJECTED', failure=error.details())
+            self.db.event('ENTRY_NOT_SUBMITTED', trade_id=trade['id'], **error.details())
+        except Exception as error:
+            self.db.event('ENTRY_SUBMISSION_FAILED', trade_id=trade['id'],
+                          **(error.details() if isinstance(error, APIError) else {'error_type': type(error).__name__}))
             self.db.update(trade, 'UNCERTAIN')
         self._reconcile()
 
@@ -117,7 +122,13 @@ class Trader:
                 order_id = self.ex.create(signal, qty, sl, tp)
                 self.db.update_addition(addition, 'SUBMITTED', exchange_order_id=order_id)
                 self.db.event('ADD_ORDER_SUBMITTED', trade_id=trade['id'], message_id=message_id, order_id=order_id)
-            except Exception:
+            except EntryNotSubmitted as error:
+                self.db.update_addition(addition, 'REJECTED', failure=error.details())
+                self.db.update(self.db.active(), 'OPEN')
+                self.db.event('ENTRY_NOT_SUBMITTED', trade_id=trade['id'], message_id=message_id, **error.details())
+            except Exception as error:
+                self.db.event('ENTRY_SUBMISSION_FAILED', trade_id=trade['id'], message_id=message_id,
+                              **(error.details() if isinstance(error, APIError) else {'error_type': type(error).__name__}))
                 self.db.update_addition(addition, 'UNCERTAIN')
                 self.db.update(self.db.active(), 'UNCERTAIN')
         self._reconcile()
@@ -185,6 +196,30 @@ class Trader:
         self._reconcile()
         self.process_pending()
 
+    def reconcile_flat_entry(self, trade):
+        """A missing position alone never proves an unacknowledged entry failed."""
+        d = trade['data']
+        if d.get('exchange_order_id'):
+            order = self.ex.find_order(d['side'], d['exchange_order_id'])
+            if order and order['status'] in ('filled', 'cancelled', 'partially_cancelled', 'rejected'):
+                filled = (D(order['total_quantity']) - D(order['remaining_quantity'])
+                          - D(order.get('cancelled_quantity', 0)))
+                if order['status'] == 'rejected' or filled == 0:
+                    self.db.update(trade, 'REJECTED', exit_reason='ENTRY_TERMINAL_NO_FILL')
+                    self.db.event('ENTRY_NOT_FILLED', trade_id=trade['id'], order_id=order['id'])
+                    return
+                if 0 < filled <= D(d['quantity']) and not self.ex.orders('BUY') and not self.ex.orders('SELL'):
+                    # Recheck flat after order history; never close a DB record while
+                    # an exchange position or working entry can still remain.
+                    positions = self.ex.positions()
+                    if not any(D(p.get(k) or 0) != 0 for p in positions
+                               for k in ('active_pos', 'inactive_pos_buy', 'inactive_pos_sell')):
+                        self.db.close(trade, 'EXCHANGE_CLOSED_BEFORE_RECOVERY', D(d['margin']))
+                        return
+        if trade['status'] != 'UNCERTAIN':
+            self.db.update(trade, 'UNCERTAIN')
+            self.db.event('ORDER_UNCERTAIN_REQUIRES_REVIEW', trade_id=trade['id'])
+
     def _reconcile(self):
         trade = self.db.active()
         if not trade:
@@ -211,8 +246,7 @@ class Trader:
                 # Exchange positions are netted; do not invent a fill price or realized PnL.
                 self.db.close(trade, d.get('exit_reason', 'EXCHANGE_CLOSED'), D(d['margin']))
             elif time.time() - d['submitted_at'] > 60:
-                self.db.update(trade, 'UNCERTAIN')
-                self.db.event('ORDER_UNCERTAIN_REQUIRES_REVIEW', trade_id=trade['id'])
+                self.reconcile_flat_entry(trade)
             return
         p = positions[0]
         if not d.get('position_id'):
@@ -225,8 +259,9 @@ class Trader:
                 candidates = [o for o in orders if D(o['total_quantity']) == D(d['quantity']) and
                               float(o['created_at']) / 1000 >= d['submitted_at'] - 2]
             if len(candidates) != 1:
-                self.db.update(trade, 'UNCERTAIN')
-                self.db.event('ORDER_UNCERTAIN_REQUIRES_REVIEW', trade_id=trade['id'])
+                if trade['status'] != 'UNCERTAIN':
+                    self.db.update(trade, 'UNCERTAIN')
+                    self.db.event('ORDER_UNCERTAIN_REQUIRES_REVIEW', trade_id=trade['id'])
                 return
             order = candidates[0]
             d['exchange_order_id'] = order['id']

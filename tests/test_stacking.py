@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from app.database import Database
 from app.signals import Signal
 from app.trading import Trader
+from app.exchange import EntryNotSubmitted
 
 
 class NettedExchange:
@@ -208,6 +209,20 @@ class StackingTests(unittest.TestCase):
         self.ex.extra_orders=[{'id':'external','stage':'default'}]
         self.enter()
         self.assertEqual(len(self.ex.calls),1)
+    def test_preparation_failure_does_not_leave_phantom_position(self):
+        def fail(*args): raise EntryNotSubmitted('HTTP 400','positions/update_leverage',400)
+        self.ex.create = fail
+        self.enter()
+        self.assertIsNone(self.db.active())
+        self.assertEqual(self.db.daily(),(0,0))
+    def test_preparation_failure_on_add_keeps_original_position(self):
+        self.enter()
+        def fail(*args): raise EntryNotSubmitted('HTTP 400','positions/update_leverage',400)
+        self.ex.create = fail
+        self.enter()
+        self.assertEqual(self.db.active()['status'],'OPEN')
+        self.assertEqual(D(self.db.active()['data']['quantity']),D('.005'))
+        self.assertEqual(self.db.daily(),(1,0))
     def test_bot_full_position_protection_does_not_block_add(self):
         self.enter()
         self.ex.extra_orders=[{'id':'sl','stage':'tpsl_exit','status':'untriggered',

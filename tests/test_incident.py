@@ -6,13 +6,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from app.database import Database
-from app.exchange import APIError, CoinDCX
+from app.exchange import APIError, CoinDCX, EntryNotSubmitted
 from app.messages import MessageProcessor, run_cycle
 from app.signals import parse
 from app.trading import Trader
 
 
 class ExchangeLookupTests(unittest.TestCase):
+    def test_leverage_failure_is_distinct_from_uncertain_order_submission(self):
+        ex=CoinDCX(SimpleNamespace(leverage=5))
+        ex.request=Mock(side_effect=APIError('HTTP 400','positions/update_leverage',400))
+        with self.assertRaises(EntryNotSubmitted): ex.create(Mock(),D('.005'),D(4200),D(4400))
+        ex.request.assert_called_once()
+    def test_order_timeout_remains_uncertain(self):
+        ex=CoinDCX(SimpleNamespace(leverage=5))
+        ex.request=Mock(side_effect=[{},APIError('ReadTimeout','orders/create')])
+        with self.assertRaises(APIError) as caught: ex.create(SimpleNamespace(side='BUY'),D('.005'),D(4200),D(4400))
+        self.assertNotIsInstance(caught.exception,EntryNotSubmitted)
     def test_find_known_order_stops_on_full_first_page(self):
         ex = CoinDCX(SimpleNamespace())
         ex.pair = 'B-XAU_USDT'

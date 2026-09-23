@@ -98,7 +98,7 @@ API implementation reference: https://docs.coindcx.com/ (futures active instrume
 
 ## Validation completed
 
-All 71 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
+All 78 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
 
 | Image | Side | Entry | SL | TP |
 |---|---|---:|---:|---:|
@@ -114,3 +114,9 @@ The running bot had the order ID but fetched more than 10,000 historical account
 Close keywords are checked before image extraction, including photo captions. A caption with a close keyword cannot open a new trade. Telegram polling runs before reconciliation, and a reconciliation failure cannot suppress message processing. Earlier messages and replies to unrelated signals cannot close a later trade.
 
 Per the updated entry instruction, market orders have no price-gap filter. `MAX_ENTRY_DEVIATION_PERCENT` is obsolete and ignored if present in an older `.env` file. Actual fill can differ from the historical entry printed in a trade screenshot.
+
+Entry preparation errors are recorded separately from uncertain order submissions.
+A failed leverage update cannot reserve a nonexistent trade indefinitely. Confirmed
+terminal entry orders recover even when the position closed before the first
+reconciliation. An entry with no acknowledgement remains reserved for review;
+unchanged uncertainty does not generate a new event on every polling cycle.

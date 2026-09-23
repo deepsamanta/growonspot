@@ -7,6 +7,9 @@ import requests
 
 PREFIX = '[XAU BOT]'
 EVENTS = {
+    'ENTRY_NOT_SUBMITTED': 'Entry preparation failed; no new order was submitted',
+    'ENTRY_NOT_FILLED': 'Entry ended without a fill; monitoring continues',
+    'ENTRY_SUBMISSION_FAILED': 'Entry submission error; checking outcome before allowing new trades',
     'REVERSAL_REQUESTED': 'Opposite signal: closing current position before new entry',
     'ADD_ORDER_SUBMITTED': 'Same-side entry submitted; fill not yet confirmed',
     'POSITION_ADDED': 'Same-side entry filled; applying newest SL/TP to combined position',

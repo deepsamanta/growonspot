@@ -58,5 +58,26 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.ex.exit_calls, ['position'])
     def test_uncertain_entry_remains_reserved(self):
         self.ex.pos = []
+        self.ex.find_order = lambda *args: None
         self.trader.reconcile()
         self.assertIsNotNone(self.db.active())
+    def test_rejected_acknowledged_entry_releases_reservation(self):
+        self.ex.pos = []
+        self.ex.find_order = lambda *args: {'id': 'order', 'status': 'rejected',
+            'total_quantity': '.005', 'remaining_quantity': '.005', 'cancelled_quantity': 0}
+        self.trader.reconcile()
+        self.assertIsNone(self.db.active())
+        self.assertEqual(self.db.conn.execute('SELECT status FROM trades').fetchone()[0], 'REJECTED')
+    def test_filled_then_closed_before_recovery_releases_reservation(self):
+        self.ex.pos = []
+        self.trader.reconcile()
+        self.assertIsNone(self.db.active())
+        self.assertEqual(self.db.conn.execute('SELECT status FROM trades').fetchone()[0], 'CLOSED')
+    def test_unacknowledged_entry_stays_uncertain_without_repeating_events(self):
+        self.ex.pos = []
+        self.db.update(self.db.active(), 'SUBMITTING', exchange_order_id=None)
+        self.trader.reconcile()
+        before=self.db.conn.execute('SELECT count(*) FROM bot_events').fetchone()[0]
+        for _ in range(5): self.trader.reconcile()
+        self.assertEqual(self.db.active()['status'], 'UNCERTAIN')
+        self.assertEqual(before,self.db.conn.execute('SELECT count(*) FROM bot_events').fetchone()[0])
