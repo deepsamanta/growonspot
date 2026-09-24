@@ -37,6 +37,18 @@ class NewSignalTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_in_caption(self):
         await self.processor.process(self.message(10,'New gold buy guys',True))
         self.trader.enter.assert_called_once()
+    async def test_september24_actual_new_photo_reaches_market_entry(self):
+        from app.signals import extract_image
+        fixture=Path(__file__).parent/'fixtures'/'signal_20260924_1001.jpg'
+        message=self.message(13459,'New',True)
+        async def download(file): Path(file).write_bytes(fixture.read_bytes())
+        message.download_media=AsyncMock(side_effect=download)
+        with patch('app.messages.extract_image',side_effect=extract_image):
+            await self.processor.process(message)
+        self.trader.enter.assert_called_once()
+        signal=self.trader.enter.call_args.args[2]
+        self.assertEqual((signal.side,str(signal.entry),str(signal.sl),str(signal.tp)),
+                         ('SELL','4285.37','4322.67','4239.04'))
     async def test_new_before_image(self):
         await self.processor.process(self.message(10,'New trade guys'))
         self.trader.enter.assert_not_called()

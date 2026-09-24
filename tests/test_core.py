@@ -11,6 +11,13 @@ SHORT = 'XAUUSD, sell 0.50\n4 336.09 → 4 289.31\nS / L: 4 338.77\nT / P: 4 289
 LONG = 'XAUUSD, buy 0.50\n4 346.33 → 4 359.45\nS/L: 4 325.69\nT/P: 4 393.02'
 
 class CoreTests(unittest.TestCase):
+    def test_ocr_repeated_arrow_keeps_exact_entry_and_protection(self):
+        for arrow in ('→→','→ →','➜➜','⟶⟶'):
+            with self.subTest(arrow=arrow):
+                text='XAUUSD sell 0.50\n4285.37'+arrow+'4286.29\n#2081918007\nS/L:4322.67\nT/P:4239.04'
+                signal=parse(text)
+                self.assertEqual((signal.side,signal.entry,signal.sl,signal.tp,signal.ticket_id),
+                                 ('SELL',D('4285.37'),D('4322.67'),D('4239.04'),'2081918007'))
     def test_reference_values(self):
         short, long = parse(SHORT), parse(LONG)
         self.assertEqual((short.side, short.entry, short.sl, short.tp), ('SELL', D('4336.09'), D('4338.77'), D('4289.31')))

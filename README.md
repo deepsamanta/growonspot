@@ -98,7 +98,7 @@ API implementation reference: https://docs.coindcx.com/ (futures active instrume
 
 ## Validation completed
 
-All 85 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
+All 87 offline checks passed, including OCR on both actual supplied JPGs, acceptance of complete signals with zero OCR scores, persistent duplicates/restart state, $5 sizing, keyword matching, position isolation, pending close recovery, protection failure exits, and avoiding repeated exits. The supplied images produced exactly:
 
 | Image | Side | Entry | SL | TP |
 |---|---|---:|---:|---:|
@@ -125,3 +125,8 @@ Explicit HTTP 400/401/404/422 order rejections also release the failed entry
 reservation. Timeouts, rate limits and server failures remain uncertain and
 are never blindly retried. Unconfirmed-exit alerts are persisted once per exit,
 including across restart, without repeating the exit request.
+
+The September 24 10:01 signal is included as an exact-image regression fixture.
+Repeated OCR arrow glyphs (such as `4285.37→→4286.29`) are normalized before
+parsing; price fields are unchanged. Its NEW-caption path is checked through
+the message processor with trading mocked, so no test orders are placed.

@@ -40,6 +40,9 @@ def parse(text):
     if is_update_text(text):
         raise ValueError('SIGNAL_REJECTED_UPDATE_IMAGE')
     text = text.upper().replace('\u00a0', ' ').replace('\u202f', ' ')
+    # OCR can emit the same printed arrow twice (e.g. 4285.37→→4286.29).
+    # Collapse only repeated arrow glyphs; never alter prices or infer fields.
+    text = re.sub(r'([→➜⟶])(?:\s*\1)+', r'\1', text)
     symbols = re.findall(r'\bXAU[ /-]*USDT?\b', text)
     sides = re.findall(r'\b(BUY|SELL)\b', text)
     # One complete trade card only; ambiguous/multiple cards are rejected.
