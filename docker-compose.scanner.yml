@@ -1,0 +1,25 @@
+services:
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner
+    env_file:
+      - .env
+      - .env.scanner
+    restart: unless-stopped
+    init: true
+    volumes:
+      - ./scanner-data:/app/scanner-data
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

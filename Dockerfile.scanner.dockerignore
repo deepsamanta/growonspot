@@ -1,0 +1,7 @@
+**
+!Dockerfile.scanner
+!requirements-scanner.txt
+!scanner/
+!scanner/**
+scanner/**/__pycache__/
+scanner/**/*.pyc

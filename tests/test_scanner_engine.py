@@ -1,0 +1,107 @@
+import tempfile
+import time
+import unittest
+from decimal import Decimal as D
+from unittest.mock import Mock
+from scanner.config import ScannerConfig
+from scanner.engine import Engine
+from scanner.exchange import ExchangeError
+from scanner.market import DAY, Quote
+from scanner.state import ScannerState
+from scanner.strategy import Candidate
+from test_scanner_strategy import INFO, PAIR
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.db=ScannerState(self.tmp.name+'/state.db')
+        self.ex=Mock();self.market=Mock();self.emit=Mock();self.now=time.time()
+        self.ex.price.return_value=D('.31');self.ex.positions.return_value=[];self.ex.orders.return_value=[]
+        self.ex.transactions.return_value=[];self.ex.create.return_value='order1'
+        self.market.quotes.return_value={PAIR:Quote(PAIR,D('.31'),D(1),self.now,D('.30'))}
+        self.market.metadata.return_value={**INFO,'max_leverage_long':3,'max_leverage_short':3}
+        self.market.eligible_metadata.return_value=True
+        self.c=ScannerConfig(enabled=True)
+        self.e=Engine(self.c,self.db,self.ex,self.market,self.emit)
+        self.signal=Candidate(PAIR,'BUY',self.now,D('.30'),int(self.now-200*DAY),D(1))
+    def tearDown(self):self.db.conn.close();self.tmp.cleanup()
+    def enter(self):self.e.enter(self.signal);return self.db.rows()[0]
+    def filled(self,tp=0):
+        trade=self.enter();d=trade['data']
+        self.ex.find_order.return_value={'id':'order1','pair':PAIR,'status':'filled','total_quantity':d['quantity'],
+            'remaining_quantity':0,'cancelled_quantity':0,'avg_price':'.31'}
+        position={'id':'position1','pair':PAIR,'active_pos':d['quantity'],'avg_price':'.31',
+            'margin_type':'isolated','leverage':1,'take_profit_trigger':tp,'stop_loss_trigger':None}
+        self.ex.positions.return_value=[position]
+        return trade,position
+    def test_market_long_uses_approved_rounding_and_isolated(self):
+        row=self.enter();self.assertEqual(row['status'],'SUBMITTED')
+        self.ex.prepare.assert_called_once_with(PAIR,1,'isolated')
+        self.ex.create.assert_called_once_with(PAIR,'BUY',D(20),1,'isolated',D('.341'))
+        self.assertEqual(row['data']['estimated_margin'],'6.20')
+    def test_market_short_crossed_3x(self):
+        self.market.quotes.return_value={PAIR:Quote(PAIR,D('.31'),D(36),self.now)}
+        self.signal=Candidate(PAIR,'SELL',self.now,D('.312'),int(self.now-200*DAY),D(36))
+        self.enter();self.ex.prepare.assert_called_once_with(PAIR,3,'crossed')
+        self.ex.create.assert_called_once_with(PAIR,'SELL',D(29),3,'crossed',D('.288'))
+    def test_durable_reservation_precedes_exchange_submission(self):
+        def create(*args):
+            self.assertEqual(self.db.rows()[0]['status'],'SUBMITTING');return 'order1'
+        self.ex.create.side_effect=create;self.enter()
+    def test_ambiguous_submission_never_retries_after_restart(self):
+        self.ex.create.side_effect=ExchangeError('timeout','orders/create')
+        row=self.enter();self.assertEqual(row['status'],'UNCERTAIN')
+        self.e=Engine(self.c,self.db,self.ex,self.market,self.emit)
+        for _ in range(3):self.e.reconcile(self.db.get(row['id']));self.e.enter(self.signal)
+        self.ex.create.assert_called_once();self.assertEqual(len(self.db.occupied()),1)
+    def test_definite_rejection_releases_slot(self):
+        self.ex.create.side_effect=ExchangeError('bad order','orders/create',400)
+        self.assertEqual(self.enter()['status'],'REJECTED');self.assertFalse(self.db.occupied())
+    def test_existing_external_position_untouched(self):
+        self.ex.positions.return_value=[{'active_pos':'2'}]
+        self.e.enter(self.signal);self.ex.prepare.assert_not_called();self.ex.create.assert_not_called()
+    def test_five_pending_slots_prevent_sixth(self):
+        for i in range(5):self.db.reserve(str(i),f'B-C{i}_USDT',{},5)
+        self.e.enter(self.signal);self.ex.create.assert_not_called()
+    def test_revalidates_price_after_scan(self):
+        self.ex.price.return_value=D('.34');self.e.enter(self.signal);self.ex.create.assert_not_called()
+    def test_daily_profit_blocks_entry(self):
+        self.db.lock_profit(PAIR,self.now);self.e.enter(self.signal);self.ex.create.assert_not_called()
+    def test_confirmed_fill_has_tp_and_one_alert(self):
+        row,p=self.filled('.341')
+        self.e.reconcile(row);self.e.reconcile(self.db.get(row['id']))
+        self.assertEqual(self.db.get(row['id'])['status'],'OPEN')
+        fills=[c for c in self.emit.call_args_list if c.args[0]=='ENTRY_FILLED']
+        self.assertEqual(len(fills),1);self.ex.take_profit.assert_not_called()
+    def test_tp_recomputed_from_actual_fill(self):
+        row,p=self.filled('.341');self.ex.find_order.return_value['avg_price']='.32'
+        def attach(pair,position,tp):position['take_profit_trigger']=str(tp)
+        self.ex.take_profit.side_effect=attach
+        self.e.reconcile(row)
+        self.ex.take_profit.assert_called_once_with(PAIR,p,D('.352'))
+        self.assertEqual(self.db.get(row['id'])['status'],'OPEN')
+    def test_tp_already_reached_exits_only_once(self):
+        row,p=self.filled();self.ex.price.return_value=D('.35')
+        self.e.reconcile(row);self.e.reconcile(self.db.get(row['id']))
+        self.ex.exit.assert_called_once();self.assertEqual(self.db.get(row['id'])['status'],'CLOSING')
+    def test_external_quantity_change_freezes_mutations(self):
+        row,p=self.filled('.341');self.e.reconcile(row);p['active_pos']='30'
+        self.e.reconcile(self.db.get(row['id']))
+        self.assertEqual(self.db.get(row['id'])['status'],'CONFLICT')
+        self.ex.exit.assert_not_called();self.ex.take_profit.assert_not_called()
+    def test_no_loss_exit_or_stop_loss(self):
+        row,p=self.filled('.341');self.ex.price.return_value=D('.01');self.e.reconcile(row)
+        self.ex.exit.assert_not_called();self.ex.take_profit.assert_not_called()
+    def test_ledger_confirms_profit_and_locks_today(self):
+        row,p=self.filled('.341');self.e.reconcile(row);self.ex.positions.return_value=[]
+        common={'pair':PAIR,'position_id':'position1','parent_type':'Derivatives::Futures::Order','created_at':int(self.now*1000)}
+        self.ex.transactions.return_value=[{**common,'parent_id':'order1','stage':'default','amount':0,'fee_amount':'.01'},
+            {**common,'parent_id':'tp1','stage':'tpsl_exit','amount':'.6','fee_amount':'.01'}]
+        self.e.reconcile(self.db.get(row['id']))
+        self.assertEqual(self.db.get(row['id'])['status'],'CLOSED')
+        self.assertEqual(self.db.get(row['id'])['realized_pnl'],'0.58')
+        self.assertEqual(self.db.reserve('other',PAIR,{},5)[1],'PROFIT_LOCKED_TODAY')
+    def test_missing_ledger_blocks_coin_until_known(self):
+        row,p=self.filled('.341');self.e.reconcile(row);self.ex.positions.return_value=[]
+        self.e.reconcile(self.db.get(row['id']))
+        self.assertEqual(self.db.get(row['id'])['status'],'PNL_PENDING')
+        self.assertEqual(self.db.reserve('other',PAIR,{},5)[1],'DUPLICATE_SIGNAL_OR_ACTIVE_COIN')

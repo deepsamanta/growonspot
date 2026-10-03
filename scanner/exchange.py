@@ -1,0 +1,175 @@
+"""CoinDCX scanner adapter. All mutations are scoped to a non-gold pair."""
+import hashlib
+import hmac
+import json
+import time
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
+import requests
+from .market import MarketDataError, decimal
+
+BASE='https://api.coindcx.com/exchange/v1/derivatives/futures/'
+D=Decimal
+
+
+class ExchangeError(RuntimeError):
+    def __init__(self,message,endpoint='',status=None):
+        super().__init__(message)
+        self.endpoint,self.status=endpoint,status
+
+    @property
+    def rejected(self):
+        return self.status in (400,401,403,404,422)
+
+
+def nongold(pair):
+    if not isinstance(pair,str) or not pair.endswith('_USDT') or pair.split('-',1)[-1].split('_')[0] in ('XAU','XAUUSD','XAUUSDT'):
+        raise ValueError('Scanner pair is invalid or reserved for gold')
+
+
+def quantity(info, price, margin, leverage, cap=None):
+    price=decimal(price,True);budget=margin*leverage
+    step=decimal(info['quantity_increment'],True)
+    q=(budget/price/step).to_integral_value(rounding=ROUND_DOWN)*step
+    minimum=max(decimal(info['min_quantity'],True),decimal(info.get('min_trade_size',info['min_quantity']),True))
+    min_notional=decimal(info['min_notional'],True)
+    if cap is not None and (q<minimum or q*price<min_notional):
+        q=(max(minimum,min_notional/price)/step).to_integral_value(rounding=ROUND_UP)*step
+    allowed=margin if cap is None else cap
+    if q<minimum or q*price<min_notional or q*price/leverage>allowed:
+        raise ValueError('EXCHANGE_MINIMUM_EXCEEDS_MARGIN_CAP')
+    if q>min(decimal(info['max_quantity'],True),decimal(info['max_market_order_quantity'],True)):
+        raise ValueError('EXCHANGE_MAXIMUM_QUANTITY')
+    tiers=info.get('dynamic_position_leverage_details',{})
+    supported=[decimal(k,True) for k,v in tiers.items() if decimal(v,True)>=q*price]
+    if not supported or leverage>max(supported):
+        raise ValueError('LEVERAGE_NOT_SUPPORTED')
+    return q
+
+
+def target(info,side,fill,pct):
+    step=decimal(info['price_increment'],True)
+    raw=fill*(1-pct if side=='SELL' else 1+pct)
+    tp=(raw/step).to_integral_value(rounding=ROUND_DOWN if side=='SELL' else ROUND_UP)*step
+    if not decimal(info['min_price'],True)<=tp<=decimal(info['max_price'],True):
+        raise ValueError('TP_OUTSIDE_EXCHANGE_PRICE_RANGE')
+    return tp
+
+
+class Exchange:
+    def __init__(self,config,market,session=None):
+        self.c,self.market=config,market
+        self.http=session or requests.Session()
+
+    def request(self,path,body,read=False):
+        for attempt in range(3 if read else 1):
+            payload=json.dumps({**body,'timestamp':int(time.time()*1000)},separators=(',',':'))
+            signature=hmac.new(self.c.secret.encode(),payload.encode(),hashlib.sha256).hexdigest()
+            try:
+                r=self.http.post(BASE+path,data=payload,headers={'Content-Type':'application/json',
+                    'X-AUTH-APIKEY':self.c.key,'X-AUTH-SIGNATURE':signature},timeout=(5,15))
+                if not r.ok:
+                    if read and attempt<2 and (r.status_code==429 or r.status_code>=500):
+                        time.sleep(2**attempt);continue
+                    raise ExchangeError(f'CoinDCX HTTP {r.status_code}',path,r.status_code)
+                data=r.json()
+                if isinstance(data,dict) and (data.get('success') is False or str(data.get('status','')).lower() in ('error','failed')
+                        or str(data.get('code','')).isdigit() and int(data['code'])>=400):
+                    raise ExchangeError('CoinDCX error response',path,r.status_code)
+                return data
+            except (requests.RequestException,ValueError) as error:
+                if not read or attempt==2:
+                    raise ExchangeError(type(error).__name__,path) from None
+                time.sleep(2**attempt)
+        raise ExchangeError('Read retries exhausted',path)
+
+    def pages(self,path,extra):
+        seen=set()
+        for page in range(1,101):
+            rows=self.request(path,{'page':str(page),'size':'100','margin_currency_short_name':['USDT'],**extra},read=True)
+            if not isinstance(rows,list):
+                raise ExchangeError('Invalid list response',path)
+            fingerprint=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest()
+            if rows and fingerprint in seen:raise ExchangeError('Repeated pagination page',path)
+            seen.add(fingerprint)
+            yield rows
+            if len(rows)<100:return
+        raise ExchangeError('Incomplete pagination; entries blocked',path)
+
+    def positions(self,pair):
+        nongold(pair)
+        return [p for page in self.pages('positions',{'pairs':pair}) for p in page if p.get('pair')==pair]
+
+    def orders(self,pair,side,status='open,partially_filled,untriggered'):
+        nongold(pair)
+        return [o for page in self.pages('orders',{'side':side.lower(),'status':status}) for o in page if o.get('pair')==pair]
+
+    def find_order(self,pair,side,order_id):
+        nongold(pair)
+        for page in self.pages('orders',{'side':side.lower(),'status':'filled,cancelled,rejected,partially_cancelled,open,partially_filled,untriggered'}):
+            for order in page:
+                if order.get('id')==order_id:
+                    if order.get('pair')!=pair or order.get('side')!=side.lower():
+                        raise ExchangeError('Order ownership mismatch','orders')
+                    return order
+        return None
+
+    def transactions(self,since):
+        result=[]
+        last_time=float('inf')
+        ordered=True
+        for page in self.pages('positions/transactions',{'stage':'all'}):
+            for row in page:
+                stamp=float(row['created_at'])/1000
+                if stamp>last_time:ordered=False
+                last_time=stamp
+                if stamp>=since and row.get('margin_currency_short_name','USDT')=='USDT':result.append(row)
+            if page and ordered and max(float(r['created_at'])/1000 for r in page)<since:
+                return result
+        return result
+
+    def price(self,pair,side):
+        nongold(pair)
+        book=self.market.get('https://public.coindcx.com/market_data/v3/orderbook/'+pair+'-futures/50')
+        if not -30<=time.time()-float(book['ts'])/1000<=30:raise MarketDataError('Stale order book')
+        levels=[decimal(p,True) for p,q in book['asks' if side=='BUY' else 'bids'].items() if decimal(q)>0]
+        if not levels:raise MarketDataError('Empty order book')
+        return min(levels) if side=='BUY' else max(levels)
+
+    def prepare(self,pair,leverage,mode):
+        nongold(pair)
+        positions=self.positions(pair)
+        if len(positions)>1 or any(decimal(p.get(k,0))!=0 for p in positions
+                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):
+            raise ExchangeError('Position became occupied before preparation')
+        current=positions[0] if positions else {}
+        if current.get('margin_type')!=mode:
+            self.request('positions/margin_type',{'pair':pair,'margin_type':mode})
+        if decimal(current.get('leverage',0))!=leverage:
+            self.request('positions/update_leverage',{'pair':pair,'leverage':leverage,'margin_currency_short_name':'USDT'})
+
+    def create(self,pair,side,qty,leverage,mode,tp):
+        nongold(pair)
+        result=self.request('orders/create',{'order':{'pair':pair,'side':side.lower(),'order_type':'market_order',
+            'price':None,'total_quantity':float(qty),'leverage':leverage,'position_margin_type':mode,
+            'margin_currency_short_name':'USDT','take_profit_price':float(tp),'notification':'no_notification'}})
+        rows=result if isinstance(result,list) else result.get('order',[]) if isinstance(result,dict) else []
+        if isinstance(rows,dict):rows=[rows]
+        if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous order acknowledgement','orders/create')
+        return rows[0]['id']
+
+    def cancel(self,pair,order):
+        nongold(pair)
+        if order.get('pair')!=pair:raise ExchangeError('Cancel ownership mismatch')
+        self.request('orders/cancel',{'id':order['id']})
+
+    def take_profit(self,pair,position,tp):
+        nongold(pair)
+        if position.get('pair')!=pair:raise ExchangeError('TP ownership mismatch')
+        # Deliberately no stop_loss / stop_loss_price field anywhere in scanner orders.
+        return self.request('positions/create_tpsl',{'id':position['id'],
+            'take_profit':{'stop_price':str(tp),'order_type':'take_profit_market'}})
+
+    def exit(self,pair,position):
+        nongold(pair)
+        if position.get('pair')!=pair:raise ExchangeError('Exit ownership mismatch')
+        self.request('positions/exit',{'id':position['id']})
