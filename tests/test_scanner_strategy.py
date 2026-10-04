@@ -29,8 +29,9 @@ class StrategyTests(unittest.TestCase):
         signal=evaluate(PAIR,self.quote(9.9),self.daily,self.now)
         self.assertEqual((signal.side,signal.reference),('SELL',D(10)))
     def test_short_band_and_strict_pump(self):
-        for price,change in [(9.89,36),(10.01,36),(9.99,35)]:
+        for price,change in [(8.99,36),(10.01,36),(10,36),(9.99,35)]:
             self.assertIsNone(evaluate(PAIR,self.quote(price,change),self.daily,self.now))
+        self.assertEqual(evaluate(PAIR,self.quote(9,36),self.daily,self.now).reference,D(10))
     def test_unconfirmed_and_incomplete_weeks_cannot_create_pivot(self):
         self.assertEqual(weekly_resistances(bars([2,3,10,3]),START+28*DAY),[])
         sample=bars([2,3,10,3,2]);sample.pop(20)

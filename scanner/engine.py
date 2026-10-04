@@ -1,10 +1,10 @@
 """Serialized execution for the independent scanner, with durable order intent."""
 import time
 from decimal import Decimal
-from .exchange import ExchangeError, quantity, target
+from .exchange import ExchangeError, quantity, target, short_limit_price
 from .market import decimal
 from .capacity import account_capacity
-from .strategy import long_confirmation,FOUR_HOURS
+from .strategy import long_confirmation
 
 D=Decimal
 
@@ -44,7 +44,8 @@ class Engine:
         if quote is None:return
         price=self.ex.price(pair,side)
         if side=='SELL':
-            if quote.change_24h<=35 or not candidate.reference*D('.99')<=price<=candidate.reference:return
+            current=max(price,quote.price,quote.mark_price or quote.price)
+            if quote.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:return
             margin,leverage,mode,pct=self.c.short_margin,self.c.short_leverage,'crossed',self.c.short_tp
             cap=None
         else:
@@ -63,10 +64,13 @@ class Engine:
         # current dynamic position/leverage table for every entry.
         if side_limit is not None and decimal(side_limit)<leverage:
             raise ValueError('LEVERAGE_NOT_SUPPORTED')
-        sizing_price=max(price,quote.price,quote.mark_price or quote.price)
+        limit=short_limit_price(info,candidate.reference,quote.price) if side=='SELL' else None
+        if limit is not None and info.get('order_types') and 'limit_order' not in info['order_types']:
+            raise ValueError('LIMIT_ORDERS_NOT_SUPPORTED')
+        sizing_price=max(limit or price,quote.price,quote.mark_price or quote.price)
         minimum_price=min(price,quote.price,quote.mark_price or quote.price)
         qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
-        tp=target(info,side,price,pct)
+        tp=target(info,side,limit or price,pct)
         if any(decimal(p.get(k,0))!=0 for p in self.ex.positions(pair)
                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):return
         if self.ex.orders(pair,'BUY') or self.ex.orders(pair,'SELL'):return
@@ -77,8 +81,11 @@ class Engine:
             self.ledger(midnight);self.ledger_at=now
         data={'pair':pair,'side':side,'quantity':str(qty),'leverage':leverage,'mode':mode,
               'margin_budget':str(margin),'margin_cap':str(cap if cap is not None else margin),
-              'estimated_margin':str(qty*price/leverage),'tp_pct':str(pct),'tp':str(tp),
+              'estimated_margin':str(qty*sizing_price/leverage),'tp_pct':str(pct),'tp':str(tp),
               'reference':str(candidate.reference),'submitted_at':now,'market_price':str(price),
+              'order_type':'limit_order' if limit is not None else 'market_order',
+              'limit_price':str(limit) if limit is not None else None,
+              'expires_at':now+self.c.short_limit_seconds if limit is not None else None,
               'confirmation':confirmation if side=='BUY' else 'WEEKLY_RESISTANCE','info':info}
         key=f'{pair}:{side}:{int(candidate.observed_at//300)}'
         ident,reason=self.db.reserve(key,pair,data,self.c.max_positions,now,{'BUY':2,'SELL':3})
@@ -95,24 +102,31 @@ class Engine:
             if latest is None:raise ValueError('FRESH_QUOTE_UNAVAILABLE')
             price=self.ex.price(pair,side)
             if side=='SELL':
-                if latest.change_24h<=35 or not candidate.reference*D('.99')<=price<=candidate.reference:
+                current=max(price,latest.price,latest.mark_price or latest.price)
+                if latest.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:
                     raise ValueError('SHORT_LEFT_RESISTANCE_BAND')
+                limit=short_limit_price(info,candidate.reference,latest.price)
             elif (price>min(candidate.reference,latest.low_24h or latest.price,latest.price)*D('1.10')
                     or not long_confirmation(intraday,time.time(),price)):
                 raise ValueError('LONG_CONFIRMATION_NO_LONGER_VALID')
-            sizing_price=max(price,latest.price,latest.mark_price or latest.price)
+            sizing_price=max(limit or price,latest.price,latest.mark_price or latest.price)
             minimum_price=min(price,latest.price,latest.mark_price or latest.price)
             qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
-            tp=target(info,side,price,pct)
+            tp=target(info,side,limit or price,pct)
             self.db.update(ident,'RESERVED',quantity=str(qty),tp=str(tp),market_price=str(price),
-                           estimated_margin=str(qty*sizing_price/leverage),submitted_at=time.time())
+                           estimated_margin=str(qty*sizing_price/leverage),submitted_at=time.time(),
+                           limit_price=str(limit) if limit is not None else None,
+                           expires_at=time.time()+self.c.short_limit_seconds if limit is not None else None)
             if not self.capacity().within_limits:
                 raise ValueError('ACCOUNT_CAPACITY_CHANGED_BEFORE_SUBMISSION')
             self.db.update(ident,'SUBMITTING')
             submitted=True
-            order_id=self.ex.create(pair,side,qty,leverage,mode,tp)
+            order_id=(self.ex.create(pair,side,qty,leverage,mode,tp,limit_price=limit) if limit is not None
+                      else self.ex.create(pair,side,qty,leverage,mode,tp))
             self.db.update(ident,'SUBMITTED',order_id=order_id)
-            self.emit('ORDER_SUBMITTED',pair=pair,side=side,trade_id=ident,order_id=order_id)
+            self.emit('LIMIT_SUBMITTED' if limit is not None else 'ORDER_SUBMITTED',pair=pair,side=side,trade_id=ident,
+                      order_id=order_id,limit_price=str(limit) if limit is not None else None,
+                      expires_in_seconds=self.c.short_limit_seconds if limit is not None else None)
         except Exception as error:
             rejected=not submitted or isinstance(error,ExchangeError) and error.rejected
             self.db.update(ident,'REJECTED' if rejected else 'UNCERTAIN',error_type=type(error).__name__)
@@ -121,6 +135,22 @@ class Engine:
             self.emit('ORDER_REJECTED' if rejected else 'ORDER_UNCERTAIN',pair=pair,trade_id=ident,
                       error_type=type(error).__name__,endpoint=getattr(error,'endpoint',''),http_status=getattr(error,'status',None),
                       reason=str(error) if isinstance(error,(ExchangeError,ValueError)) else '')
+
+    def request_cancel(self,trade,order,reason):
+        """Cancel only the known entry ID; bounded retries after fresh status reads."""
+        d=trade['data'];now=time.time()
+        attempts=d.get('cancel_attempts',1 if d.get('cancel_requested') else 0)
+        if attempts and now-d.get('cancel_requested_at',d['submitted_at'])<30:return
+        if attempts>=3:
+            if not d.get('cancel_unconfirmed'):
+                self.db.update(trade['id'],'UNCERTAIN',cancel_unconfirmed=True)
+                self.emit('CANCEL_UNCERTAIN',pair=trade['pair'],trade_id=trade['id'],reason=reason)
+            return
+        self.db.update(trade['id'],'SUBMITTED',cancel_requested=True,cancel_requested_at=now,
+                       cancel_attempts=attempts+1,cancel_reason=reason)
+        self.ex.cancel(trade['pair'],order)
+        if d.get('order_type')=='limit_order':
+            self.emit('LIMIT_CANCEL_REQUESTED',pair=trade['pair'],trade_id=trade['id'],reason=reason)
 
     def reconcile(self,trade):
         ident,pair,d=trade['id'],trade['pair'],trade['data']
@@ -141,22 +171,37 @@ class Engine:
             if status!='UNCERTAIN':
                 self.db.update(ident,'UNCERTAIN');self.emit('ORDER_UNCERTAIN',pair=pair,trade_id=ident)
             return
-        if order['status'] not in ('filled','cancelled','partially_cancelled','rejected'):
-            if time.time()-d['submitted_at']>10 and not d.get('cancel_requested'):
-                self.db.update(ident,'SUBMITTED',cancel_requested=True)
-                self.ex.cancel(pair,order)
-            return
         filled=D(0) if order['status']=='rejected' else decimal(order['total_quantity'])-decimal(order['remaining_quantity'])-decimal(order.get('cancelled_quantity',0))
-        if filled==0:
-            self.db.update(ident,'REJECTED');self.emit('ORDER_REJECTED',pair=pair,trade_id=ident,reason='NO_FILL');return
-        if not 0<filled<=decimal(d['quantity']):
+        if not 0<=filled<=decimal(d['quantity']):
             self.conflict(trade,'UNEXPECTED_ORDER_FILL');return
+        if filled>0 and not d.get('fill_seen_at'):
+            d={**d,'fill_seen_at':time.time()}
+            self.db.update(ident,status,fill_seen_at=d['fill_seen_at'])
+            trade=self.db.get(ident)
+        if order['status'] not in ('filled','cancelled','partially_cancelled','rejected'):
+            reason=None
+            if d.get('cancel_requested'):
+                reason=d.get('cancel_reason','CANCELLATION_PENDING')
+            elif d.get('order_type')=='limit_order':
+                if filled>0:reason='PARTIAL_FILL_REMAINDER'
+                elif time.time()>=d.get('expires_at',d['submitted_at']+self.c.short_limit_seconds):reason='LIMIT_EXPIRED'
+                elif not self.capacity().within_limits:reason='ACCOUNT_CAPACITY_CHANGED'
+                elif any(decimal(p.get('active_pos') or 0)!=0 for p in self.ex.positions(pair)):
+                    reason='POSITION_APPEARED_WHILE_ENTRY_PENDING'
+            elif time.time()-d['submitted_at']>10:reason='MARKET_ORDER_TIMEOUT'
+            if reason:self.request_cancel(trade,order,reason)
+            return
+        if filled==0:
+            reason=d.get('cancel_reason','NO_FILL')
+            self.db.update(ident,'REJECTED',reason=reason)
+            event='LIMIT_CANCELLED' if d.get('order_type')=='limit_order' and order['status']!='rejected' else 'ORDER_REJECTED'
+            self.emit(event,pair=pair,trade_id=ident,reason=reason);return
         positions=[p for p in self.ex.positions(pair) if decimal(p['active_pos'])!=0]
         if not positions:
             if d.get('position_id'):
                 self.db.record_flat(ident,time.time())
                 self.reconcile_pnl(self.db.get(ident))
-            elif time.time()-d['submitted_at']>60:
+            elif time.time()-d['fill_seen_at']>60:
                 self.reconcile_pnl(trade)  # Can resolve an entry and TP completed before first poll.
                 if self.db.get(ident)['status'] not in ('CLOSED','UNCERTAIN'):
                     self.db.update(ident,'UNCERTAIN')
@@ -167,7 +212,7 @@ class Engine:
         if (len(positions)!=1 or decimal(p['active_pos'])!=expected
                 or d.get('position_id') and d['position_id']!=p['id']):
             # Brief position-endpoint lag after a fill does not justify another order.
-            if not d.get('position_id') and time.time()-d['submitted_at']<60:return
+            if not d.get('position_id') and time.time()-d['fill_seen_at']<60:return
             self.conflict(trade,'POSITION_QUANTITY_OR_ID_CHANGED');return
         if (str(p.get('margin_type','')).lower()!=d['mode'] or decimal(p.get('leverage',0))!=d['leverage']):
             self.conflict(trade,'MARGIN_MODE_OR_LEVERAGE_MISMATCH');return

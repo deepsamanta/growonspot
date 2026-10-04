@@ -19,6 +19,8 @@ class ScannerConfig:
     short_margin: Decimal = Decimal('3')
     short_leverage: int = 3
     short_tp: Decimal = Decimal('.07')
+    short_distance: Decimal = Decimal(os.getenv('SCANNER_SHORT_DISTANCE','0.10'))
+    short_limit_seconds: int = int(os.getenv('SCANNER_SHORT_LIMIT_SECONDS','14400'))
     long_margin: Decimal = Decimal('6')
     long_leverage: int = 1
     long_tp: Decimal = Decimal('.06')
@@ -36,5 +38,9 @@ class ScannerConfig:
             raise ValueError('Long margin cap must be from 6 to 6.50 USDT')
         if self.scan_interval<60:
             raise ValueError('Scan interval must be at least 60 seconds')
+        if not self.short_distance.is_finite() or not Decimal('0')<self.short_distance<=Decimal('.10'):
+            raise ValueError('Short distance must be above 0 and at most 0.10')
+        if not 60<=self.short_limit_seconds<=14400:
+            raise ValueError('Short limit lifetime must be between 60 and 14400 seconds')
         if os.getenv('SCANNER_ENABLED','false').lower() not in ('true','false'):
             raise ValueError('SCANNER_ENABLED must be true or false')

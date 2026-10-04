@@ -51,13 +51,13 @@ def scan(config,outbox,health,emit,stopping):
                     daily=history.daily(pair,now)
                     end=int(now//DAY)*DAY
                     if not daily or len(daily)<100 or daily[-1].timestamp!=end-DAY:continue
-                    candidate=evaluate(pair,quote,daily,now,allow_short=capacity.allows('SELL'))
+                    candidate=evaluate(pair,quote,daily,now,allow_short=capacity.allows('SELL'),short_distance=config.short_distance)
                     if candidate is None and capacity.allows('BUY'):
                         recent_low=min(c.low for c in daily)
                         if quote.price>recent_low*Decimal('1.10'):continue
                         low,first=history.all_time(pair,now,daily)
                         intraday=market.four_hour(pair,now)
-                        candidate=evaluate(pair,quote,daily,now,low,first,intraday,allow_short=capacity.allows('SELL'))
+                        candidate=evaluate(pair,quote,daily,now,low,first,intraday,allow_short=capacity.allows('SELL'),short_distance=config.short_distance)
                     if candidate:
                         try:outbox.put_nowait(candidate)
                         except queue.Full:pass
@@ -79,7 +79,9 @@ def run(config):
     alerts=Alerts(config.bot_token,config.chat_id)
     market=MarketData();ex=Exchange(config,market);engine=Engine(config,db,ex,market,alerts.emit)
     stopping=threading.Event();outbox=queue.Queue(maxsize=32)
-    health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0}
+    health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
+            'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
+            'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path!='/health':self.send_error(404);return
@@ -91,9 +93,10 @@ def run(config):
     server=HTTPServer(('0.0.0.0',config.health_port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
-    alerts.emit('SCANNER_STARTED',enabled=config.enabled,max_positions=5,short='3 USDT / 3x / crossed / TP 7%',
+    alerts.emit('SCANNER_STARTED',enabled=config.enabled,max_positions=5,short='Resistance LIMIT / 3 USDT / 3x / crossed / TP 7%',
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / TP 6%',stop_loss='none',
-                position_limits='All non-gold positions: 5 total / 3 short / 2 long',long_confirmation='4h consolidation or bullish reversal')
+                position_limits='All non-gold positions: 5 total / 3 short / 2 long',long_confirmation='4h consolidation or bullish reversal',
+                short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)
     try:
         while True:
             failed=False

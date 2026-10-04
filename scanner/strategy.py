@@ -64,16 +64,16 @@ def weekly_resistances(candles, now):
     return sorted(levels)
 
 
-def evaluate(pair, quote, daily, now, historical_low=None, historical_first=None,intraday=None,allow_short=True):
+def evaluate(pair, quote, daily, now, historical_low=None, historical_first=None,intraday=None,allow_short=True,short_distance=D('.10')):
     if pair == 'B-XAU_USDT' or not daily:
         return None
     first = historical_first if historical_first is not None else daily[0].timestamp
     if now-first < 100*DAY or len(daily)<100:
         return None
-    # Short only on a >35% rise and in the 1% band below resistance.
+    # Reserve a resting short limit before price reaches weekly resistance.
     if allow_short and quote.change_24h > 35:
-        above = [r for r in weekly_resistances(daily,now) if r >= quote.price]
-        if above and (above[0]-quote.price)/above[0] <= D('.01'):
+        above = [r for r in weekly_resistances(daily,now) if r > quote.price]
+        if above and (above[0]-quote.price)/above[0] <= short_distance:
             return Candidate(pair,'SELL',quote.timestamp,above[0],first,quote.change_24h)
     if historical_low is not None:
         # Include today's low so a fresh ATL is not mistaken for an older higher ATL.

@@ -56,6 +56,19 @@ def target(info,side,fill,pct):
     return tp
 
 
+def short_limit_price(info,resistance,last_price):
+    step=decimal(info['price_increment'],True)
+    price=(decimal(resistance,True)/step).to_integral_value(rounding=ROUND_UP)*step
+    if not decimal(info['min_price'],True)<=price<=decimal(info['max_price'],True):
+        raise ValueError('LIMIT_OUTSIDE_EXCHANGE_PRICE_RANGE')
+    # Check both published LTP-based bounds before sending a limit order.
+    if info.get('multiplier_up') is not None and price>last_price*(1+decimal(info['multiplier_up'])/100):
+        raise ValueError('LIMIT_OUTSIDE_EXCHANGE_LTP_RANGE')
+    if info.get('multiplier_down') is not None and price<last_price*(1-decimal(info['multiplier_down'])/100):
+        raise ValueError('LIMIT_OUTSIDE_EXCHANGE_LTP_RANGE')
+    return price
+
+
 class Exchange:
     def __init__(self,config,market,session=None):
         self.c,self.market=config,market
@@ -158,11 +171,20 @@ class Exchange:
         if decimal(current.get('leverage',0))!=leverage:
             self.request('positions/update_leverage',{'pair':pair,'leverage':leverage,'margin_currency_short_name':'USDT'})
 
-    def create(self,pair,side,qty,leverage,mode,tp):
+    def create(self,pair,side,qty,leverage,mode,tp,limit_price=None):
         nongold(pair)
-        result=self.request('orders/create',{'order':{'pair':pair,'side':side.lower(),'order_type':'market_order',
-            'price':None,'total_quantity':float(qty),'leverage':leverage,'position_margin_type':mode,
-            'margin_currency_short_name':'USDT','take_profit_price':float(tp),'notification':'no_notification'}})
+        if limit_price is not None and side!='SELL':raise ValueError('Only scanner shorts use entry limits')
+        order={'pair':pair,'side':side.lower(),'order_type':'limit_order' if limit_price is not None else 'market_order',
+            'price':float(decimal(limit_price,True)) if limit_price is not None else None,
+            'total_quantity':float(qty),'leverage':leverage,'position_margin_type':mode,
+            'margin_currency_short_name':'USDT','notification':'no_notification'}
+        if limit_price is not None:
+            order['time_in_force']='good_till_cancel'
+            # The future short TP can lie above today's market while the entry
+            # rests higher still. Attach position TP after the fill, not as a
+            # currently invalid trigger on an unfilled entry.
+        else:order['take_profit_price']=float(tp)
+        result=self.request('orders/create',{'order':order})
         rows=result if isinstance(result,list) else result.get('order',[]) if isinstance(result,dict) else []
         if isinstance(rows,dict):rows=[rows]
         if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous order acknowledgement','orders/create')
