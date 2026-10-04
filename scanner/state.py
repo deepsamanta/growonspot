@@ -39,7 +39,7 @@ class ScannerState:
         return [{**dict(r), 'data': json.loads(r['data_json'])}
                 for r in self.conn.execute('SELECT * FROM scanner_trades ORDER BY id')]
 
-    def reserve(self, signal_key, pair, data, max_positions, now=None):
+    def reserve(self, signal_key, pair, data, max_positions, now=None, side_limits=None):
         """Pending/uncertain submissions occupy slots before exchange writes."""
         if max_positions < 1 or max_positions > 5:
             raise ValueError('Scanner position cap must be between 1 and 5')
@@ -56,6 +56,12 @@ class ScannerState:
             if count >= max_positions:
                 self.conn.rollback()
                 return None, 'POSITION_LIMIT'
+            if side_limits:
+                side=data['side']
+                same=sum(1 for r in self.occupied() if r['data'].get('side') in (side,None))
+                if same>=side_limits[side]:
+                    self.conn.rollback()
+                    return None, 'SIDE_POSITION_LIMIT'
             cur = self.conn.execute("INSERT INTO scanner_trades(signal_key,pair,status,data_json,created_at) VALUES(?,?,'RESERVED',?,?)",
                                     (signal_key,pair,json.dumps(data),now))
             self.conn.commit()

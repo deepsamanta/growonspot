@@ -26,16 +26,17 @@ def nongold(pair):
         raise ValueError('Scanner pair is invalid or reserved for gold')
 
 
-def quantity(info, price, margin, leverage, cap=None):
+def quantity(info, price, margin, leverage, cap=None, minimum_price=None):
     price=decimal(price,True);budget=margin*leverage
+    minimum_price=price if minimum_price is None else decimal(minimum_price,True)
     step=decimal(info['quantity_increment'],True)
     q=(budget/price/step).to_integral_value(rounding=ROUND_DOWN)*step
     minimum=max(decimal(info['min_quantity'],True),decimal(info.get('min_trade_size',info['min_quantity']),True))
     min_notional=decimal(info['min_notional'],True)
-    if cap is not None and (q<minimum or q*price<min_notional):
-        q=(max(minimum,min_notional/price)/step).to_integral_value(rounding=ROUND_UP)*step
+    if cap is not None and (q<minimum or q*minimum_price<min_notional):
+        q=(max(minimum,min_notional/minimum_price)/step).to_integral_value(rounding=ROUND_UP)*step
     allowed=margin if cap is None else cap
-    if q<minimum or q*price<min_notional or q*price/leverage>allowed:
+    if q<minimum or q*minimum_price<min_notional or q*price/leverage>allowed:
         raise ValueError('EXCHANGE_MINIMUM_EXCEEDS_MARGIN_CAP')
     if q>min(decimal(info['max_quantity'],True),decimal(info['max_market_order_quantity'],True)):
         raise ValueError('EXCHANGE_MAXIMUM_QUANTITY')
@@ -70,7 +71,14 @@ class Exchange:
                 if not r.ok:
                     if read and attempt<2 and (r.status_code==429 or r.status_code>=500):
                         time.sleep(2**attempt);continue
-                    raise ExchangeError(f'CoinDCX HTTP {r.status_code}',path,r.status_code)
+                    detail=''
+                    try:
+                        parsed=r.json()
+                        if isinstance(parsed,dict):detail=str(parsed.get('message') or parsed.get('error') or '')
+                    except ValueError:pass
+                    for secret in (self.c.key,self.c.secret,getattr(self.c,'bot_token','')):
+                        if isinstance(secret,str) and secret:detail=detail.replace(secret,'[redacted]')
+                    raise ExchangeError(f'CoinDCX HTTP {r.status_code}: {detail[:300]}',path,r.status_code)
                 data=r.json()
                 if isinstance(data,dict) and (data.get('success') is False or str(data.get('status','')).lower() in ('error','failed')
                         or str(data.get('code','')).isdigit() and int(data['code'])>=400):
@@ -98,6 +106,9 @@ class Exchange:
     def positions(self,pair):
         nongold(pair)
         return [p for page in self.pages('positions',{'pairs':pair}) for p in page if p.get('pair')==pair]
+
+    def all_positions(self):
+        return [p for page in self.pages('positions',{}) for p in page]
 
     def orders(self,pair,side,status='open,partially_filled,untriggered'):
         nongold(pair)

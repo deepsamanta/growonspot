@@ -3,6 +3,8 @@ import time
 from decimal import Decimal
 from .exchange import ExchangeError, quantity, target
 from .market import decimal
+from .capacity import account_capacity
+from .strategy import long_confirmation,FOUR_HOURS
 
 D=Decimal
 
@@ -11,6 +13,9 @@ class Engine:
     def __init__(self,config,state,exchange,market,emit):
         self.c,self.db,self.ex,self.market,self.emit=config,state,exchange,market,emit
         self.ledger_at=0
+
+    def capacity(self):
+        return account_capacity(self.ex.all_positions(),self.db.occupied())
 
     def ledger(self,since):
         rows=self.ex.transactions(since)
@@ -21,12 +26,17 @@ class Engine:
         return rows
 
     def enter(self,candidate):
-        if not self.c.enabled or len(self.db.occupied())>=self.c.max_positions:
+        if not self.c.enabled:
             return
         pair,side=candidate.pair,candidate.side
         if pair=='B-XAU_USDT':raise ValueError('Gold is excluded')
+        capacity=self.capacity()
+        if not capacity.allows(side) or pair in capacity.pairs:
+            self.emit('ENTRY_SKIPPED',pair=pair,reason='ACCOUNT_POSITION_LIMIT',**capacity.report());return
         if any(r['pair']==pair and r['status'] not in ('CLOSED','REJECTED') for r in self.db.rows()):return
         now=time.time()
+        cooldown=self.db.cache('rejection:'+pair)
+        if cooldown and cooldown['until']>now:return
         if now-candidate.observed_at>600:return
         if side not in ('BUY','SELL'):raise ValueError('Invalid side')
         # Refresh quotes at execution, after a potentially lengthy universe scan.
@@ -42,12 +52,20 @@ class Engine:
             if price>low*D('1.10'):return
             margin,leverage,mode,pct=self.c.long_margin,self.c.long_leverage,'isolated',self.c.long_tp
             cap=self.c.long_margin_cap
+            intraday=self.market.four_hour(pair,now)
+            confirmation=long_confirmation(intraday,now,price)
+            if not confirmation:return
         if now-candidate.history_first<100*86400:return
         info=self.market.metadata(pair)
         if not self.market.eligible_metadata(info):return
-        if decimal(info.get('max_leverage_short' if side=='SELL' else 'max_leverage_long',0))<leverage:
+        side_limit=info.get('max_leverage_short' if side=='SELL' else 'max_leverage_long')
+        # CoinDCX often leaves these legacy fields null; quantity() enforces the
+        # current dynamic position/leverage table for every entry.
+        if side_limit is not None and decimal(side_limit)<leverage:
             raise ValueError('LEVERAGE_NOT_SUPPORTED')
-        qty=quantity(info,price,margin,leverage,cap)
+        sizing_price=max(price,quote.price,quote.mark_price or quote.price)
+        minimum_price=min(price,quote.price,quote.mark_price or quote.price)
+        qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
         tp=target(info,side,price,pct)
         if any(decimal(p.get(k,0))!=0 for p in self.ex.positions(pair)
                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):return
@@ -61,14 +79,35 @@ class Engine:
               'margin_budget':str(margin),'margin_cap':str(cap if cap is not None else margin),
               'estimated_margin':str(qty*price/leverage),'tp_pct':str(pct),'tp':str(tp),
               'reference':str(candidate.reference),'submitted_at':now,'market_price':str(price),
-              'info':info}
+              'confirmation':confirmation if side=='BUY' else 'WEEKLY_RESISTANCE','info':info}
         key=f'{pair}:{side}:{int(candidate.observed_at//300)}'
-        ident,reason=self.db.reserve(key,pair,data,self.c.max_positions,now)
+        ident,reason=self.db.reserve(key,pair,data,self.c.max_positions,now,{'BUY':2,'SELL':3})
         if ident is None:
             self.emit('ENTRY_SKIPPED',pair=pair,reason=reason);return
         submitted=False
         try:
+            if not self.capacity().within_limits:
+                self.db.update(ident,'REJECTED',reason='ACCOUNT_CAPACITY_CHANGED');return
             self.ex.prepare(pair,leverage,mode)
+            # Private preflight calls take time: refresh sizing immediately before
+            # submission, using last/mark as well as the executable book price.
+            latest=self.market.quotes().get(pair)
+            if latest is None:raise ValueError('FRESH_QUOTE_UNAVAILABLE')
+            price=self.ex.price(pair,side)
+            if side=='SELL':
+                if latest.change_24h<=35 or not candidate.reference*D('.99')<=price<=candidate.reference:
+                    raise ValueError('SHORT_LEFT_RESISTANCE_BAND')
+            elif (price>min(candidate.reference,latest.low_24h or latest.price,latest.price)*D('1.10')
+                    or not long_confirmation(intraday,time.time(),price)):
+                raise ValueError('LONG_CONFIRMATION_NO_LONGER_VALID')
+            sizing_price=max(price,latest.price,latest.mark_price or latest.price)
+            minimum_price=min(price,latest.price,latest.mark_price or latest.price)
+            qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
+            tp=target(info,side,price,pct)
+            self.db.update(ident,'RESERVED',quantity=str(qty),tp=str(tp),market_price=str(price),
+                           estimated_margin=str(qty*sizing_price/leverage),submitted_at=time.time())
+            if not self.capacity().within_limits:
+                raise ValueError('ACCOUNT_CAPACITY_CHANGED_BEFORE_SUBMISSION')
             self.db.update(ident,'SUBMITTING')
             submitted=True
             order_id=self.ex.create(pair,side,qty,leverage,mode,tp)
@@ -77,8 +116,11 @@ class Engine:
         except Exception as error:
             rejected=not submitted or isinstance(error,ExchangeError) and error.rejected
             self.db.update(ident,'REJECTED' if rejected else 'UNCERTAIN',error_type=type(error).__name__)
+            if isinstance(error,ExchangeError) and error.rejected:
+                self.db.save_cache('rejection:'+pair,{'until':time.time()+900,'reason':str(error)})
             self.emit('ORDER_REJECTED' if rejected else 'ORDER_UNCERTAIN',pair=pair,trade_id=ident,
-                      error_type=type(error).__name__,endpoint=getattr(error,'endpoint',''),http_status=getattr(error,'status',None))
+                      error_type=type(error).__name__,endpoint=getattr(error,'endpoint',''),http_status=getattr(error,'status',None),
+                      reason=str(error) if isinstance(error,(ExchangeError,ValueError)) else '')
 
     def reconcile(self,trade):
         ident,pair,d=trade['id'],trade['pair'],trade['data']
@@ -135,8 +177,9 @@ class Engine:
                 self.emit('EXIT_UNCERTAIN',pair=pair,trade_id=ident)
             return
         fill=decimal(order.get('avg_price') or p['avg_price'],True)
-        tp=target(d['info'],d['side'],fill,decimal(d['tp_pct']))
-        self.db.update(ident,'PROTECTING',position_id=p['id'],filled_quantity=str(filled),fill=str(fill),tp=str(tp))
+        pct=self.c.long_tp if d['side']=='BUY' else self.c.short_tp
+        tp=target(d['info'],d['side'],fill,pct)
+        self.db.update(ident,'PROTECTING',position_id=p['id'],filled_quantity=str(filled),fill=str(fill),tp=str(tp),tp_pct=str(pct))
         if not d.get('fill_alerted'):
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),

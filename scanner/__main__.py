@@ -21,7 +21,8 @@ def main():
         from .config import ScannerConfig
         from .exchange import Exchange
         config=ScannerConfig();config.validate();ex=Exchange(config,market)
-        ex.positions('B-ETH_USDT')
+        from .capacity import account_capacity
+        result['account_capacity']=account_capacity(ex.all_positions(),[]).report()
         ex.orders('B-ETH_USDT','BUY')
         import time
         transactions=ex.transactions(time.time()-86400)

@@ -31,6 +31,7 @@ class Quote:
     change_24h: Decimal
     timestamp: float
     low_24h: Decimal = None
+    mark_price: Decimal = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,10 @@ class MarketData:
                 stamp = float(row.get('btST', 0)) / 1000
                 if not -30 <= now - stamp <= max_age:
                     continue
-                result[pair] = Quote(pair, decimal(row['ls'], True), decimal(row['pc']), stamp, decimal(row.get('l',row['ls']),True))
+                mark=None
+                if row.get('mp') is not None and -30<=now-float(row.get('bmST',0))/1000<=max_age:
+                    mark=decimal(row['mp'],True)
+                result[pair] = Quote(pair, decimal(row['ls'], True), decimal(row['pc']), stamp, decimal(row.get('l',row['ls']),True),mark)
             except (MarketDataError, KeyError, TypeError, ValueError):
                 continue
         return result
@@ -148,3 +152,16 @@ class MarketData:
                     found[candle.timestamp] = candle
             cursor = stop
         return sorted(found.values(), key=lambda c: c.timestamp)
+
+    def four_hour(self,pair,now):
+        # CoinDCX documents 60-minute candles; form 4h bars only from all four
+        # completed constituent hours, avoiding unsupported resolutions.
+        interval=4*3600;end=int(now//interval)*interval
+        hours={c.timestamp:c for c in self.candles(pair,end-8*interval,end,'60',3600)}
+        result=[]
+        for start in range(end-8*interval,end,interval):
+            group=[hours.get(start+n*3600) for n in range(4)]
+            if any(c is None for c in group):continue
+            result.append(Candle(start,group[0].open,max(c.high for c in group),min(c.low for c in group),
+                                group[-1].close,sum(c.volume for c in group)))
+        return result

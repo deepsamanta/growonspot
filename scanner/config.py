@@ -21,7 +21,7 @@ class ScannerConfig:
     short_tp: Decimal = Decimal('.07')
     long_margin: Decimal = Decimal('6')
     long_leverage: int = 1
-    long_tp: Decimal = Decimal('.10')
+    long_tp: Decimal = Decimal('.06')
     long_margin_cap: Decimal = Decimal(os.getenv('SCANNER_LONG_MARGIN_CAP','6.50'))
     scan_interval: int = int(os.getenv('SCANNER_SCAN_SECONDS','300'))
     poll: int = 5

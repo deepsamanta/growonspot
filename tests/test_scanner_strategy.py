@@ -3,7 +3,7 @@ import unittest
 from decimal import Decimal as D
 from unittest.mock import Mock
 from scanner.market import DAY, Candle, Quote, MarketDataError
-from scanner.strategy import weekly_resistances, evaluate, History
+from scanner.strategy import weekly_resistances, evaluate, History, long_confirmation
 from scanner.state import ScannerState
 from scanner.exchange import quantity, target, Exchange
 
@@ -21,6 +21,7 @@ class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.daily=bars([2]*8+[3,4,10,4,3]+[2]*4)
         self.now=START+len(self.daily)*DAY
+        self.intraday=[Candle(t,D('.54'),D('.55'),D('.53'),D('.54'),D(1)) for t in range(self.now-6*14400,self.now,14400)]
     def quote(self,price,change=36,low=None):
         return Quote(PAIR,D(str(price)),D(str(change)),self.now,D(str(low)) if low else None)
     def test_weekly_pivot_and_near_resistance_short(self):
@@ -40,9 +41,9 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(evaluate(PAIR,self.quote(9.99),self.daily[-99:],self.now))
         self.assertIsNone(evaluate('B-XAU_USDT',self.quote(9.99),self.daily,self.now))
     def test_long_uses_full_history_low_and_todays_low(self):
-        self.assertEqual(evaluate(PAIR,self.quote(.55,0),self.daily,self.now,D('.5')).side,'BUY')
-        self.assertIsNone(evaluate(PAIR,self.quote(.551,0),self.daily,self.now,D('.5')))
-        self.assertIsNone(evaluate(PAIR,self.quote(.5,0,.4),self.daily,self.now,D('.5')))
+        self.assertEqual(evaluate(PAIR,self.quote(.55,0),self.daily,self.now,D('.5'),intraday=self.intraday).side,'BUY')
+        self.assertIsNone(evaluate(PAIR,self.quote(.551,0),self.daily,self.now,D('.5'),intraday=self.intraday))
+        self.assertIsNone(evaluate(PAIR,self.quote(.5,0,.4),self.daily,self.now,D('.5'),intraday=self.intraday))
     def test_old_low_cached_across_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             db=ScannerState(folder+'/state.db');market=Mock()

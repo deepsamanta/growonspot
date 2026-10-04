@@ -16,6 +16,28 @@ class Candidate:
     reference: Decimal
     history_first: int
     change_24h: Decimal
+    confirmation: str = ''
+
+
+FOUR_HOURS=4*3600
+
+
+def long_confirmation(candles,now,price):
+    """Completed 4h consolidation or a confirmed bullish higher-low breakout."""
+    end=int(now//FOUR_HOURS)*FOUR_HOURS
+    bars=[c for c in candles if c.timestamp+FOUR_HOURS<=end][-6:]
+    if len(bars)!=6 or [c.timestamp for c in bars]!=list(range(end-6*FOUR_HOURS,end,FOUR_HOURS)):
+        return None
+    last,previous=bars[-1],bars[-2]
+    if price<min(last.low,previous.low):return None
+    if (last.close>last.open and last.close>max(c.high for c in bars[-4:-1])
+            and last.low>previous.low and price>=last.low):
+        return 'BULLISH_REVERSAL'
+    low=min(c.low for c in bars)
+    if (max(c.high for c in bars)<=low*D('1.04')
+            and min(c.low for c in bars[-2:])>=min(c.low for c in bars[:4])):
+        return 'CONSOLIDATION'
+    return None
 
 
 def weekly_resistances(candles, now):
@@ -42,22 +64,23 @@ def weekly_resistances(candles, now):
     return sorted(levels)
 
 
-def evaluate(pair, quote, daily, now, historical_low=None, historical_first=None):
+def evaluate(pair, quote, daily, now, historical_low=None, historical_first=None,intraday=None,allow_short=True):
     if pair == 'B-XAU_USDT' or not daily:
         return None
     first = historical_first if historical_first is not None else daily[0].timestamp
     if now-first < 100*DAY or len(daily)<100:
         return None
     # Short only on a >35% rise and in the 1% band below resistance.
-    if quote.change_24h > 35:
+    if allow_short and quote.change_24h > 35:
         above = [r for r in weekly_resistances(daily,now) if r >= quote.price]
         if above and (above[0]-quote.price)/above[0] <= D('.01'):
             return Candidate(pair,'SELL',quote.timestamp,above[0],first,quote.change_24h)
     if historical_low is not None:
         # Include today's low so a fresh ATL is not mistaken for an older higher ATL.
         low = min(historical_low,quote.low_24h or quote.price,quote.price)
-        if quote.price <= low * D('1.10'):
-            return Candidate(pair,'BUY',quote.timestamp,low,first,quote.change_24h)
+        confirmation=long_confirmation(intraday or [],now,quote.price)
+        if quote.price <= low * D('1.10') and confirmation:
+            return Candidate(pair,'BUY',quote.timestamp,low,first,quote.change_24h,confirmation)
     return None
 
 
