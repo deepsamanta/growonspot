@@ -12,6 +12,12 @@ TITLES={'ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitte
         'EXIT_CONFIRMED':'Exit confirmed','TP_EXIT_REQUESTED':'Take-profit exit requested',
         'EXIT_UNCERTAIN':'Exit outcome requires review','TP_PENDING':'Take-profit attachment pending',
         'OWNERSHIP_CONFLICT':'Position needs manual review','SCANNER_STARTED':'Scanner monitoring started',
+        'MANUAL_AVERAGE_DETECTED':'Manual addition detected; automatic averaging blocked for this position',
+        'AVERAGE_SUBMITTED':'One-time short averaging limit submitted',
+        'AVERAGE_FILLED':'Short addition filled; TP follows combined average entry',
+        'AVERAGE_CANCEL_REQUESTED':'Bot averaging remainder cancellation requested',
+        'AVERAGE_UNCERTAIN':'Averaging order needs review; no resubmission',
+        'AVERAGE_REJECTED':'Averaging order rejected; no resubmission',
         'SCANNER_ERROR':'Scanner error','RECONCILE_ERROR':'Position reconciliation error'}
 
 

@@ -18,6 +18,7 @@ class ShortLimitTests(unittest.TestCase):
         self.now=time.time();self.ex=Mock();self.market=Mock();self.emit=Mock()
         self.ex.all_positions.return_value=[];self.ex.positions.return_value=[];self.ex.orders.return_value=[]
         self.ex.transactions.return_value=[];self.ex.price.return_value=D('.95');self.ex.create.return_value='entry1'
+        self.ex.recent_entries.return_value=[]
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.95'),D(36),self.now,D('.7'),D('.95'))}
         self.market.metadata.return_value={**INFO,'max_leverage_short':None,'order_types':['limit_order','market_order']}
         self.market.eligible_metadata.return_value=True

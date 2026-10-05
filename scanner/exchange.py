@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import requests
 from .market import MarketDataError, decimal
@@ -139,6 +140,28 @@ class Exchange:
                         raise ExchangeError('Order ownership mismatch','orders')
                     return order
         return None
+
+    def recent_entries(self,pair,side,since):
+        """Aggregate actual fills using the pair/date-filtered trades endpoint.
+
+        Orders are sorted by update time, not creation time, and account-wide
+        history can be enormous. No order-history sorting assumption is needed.
+        The caller separately verifies each addition against the position ledger.
+        """
+        nongold(pair)
+        start=datetime.fromtimestamp(since,timezone.utc).date().isoformat()
+        end=(datetime.now(timezone.utc)+timedelta(days=1)).date().isoformat()
+        grouped={}
+        for page in self.pages('trades',{'pair':pair,'from_date':start,'to_date':end}):
+            for fill in page:
+                if (float(fill['timestamp'])/1000<since or fill.get('pair')!=pair
+                        or fill.get('side')!=side.lower()):continue
+                oid=fill['order_id'];qty=decimal(fill['quantity'],True);price=decimal(fill['price'],True)
+                item=grouped.setdefault(oid,{'qty':D(0),'cost':D(0),'stamp':float(fill['timestamp'])})
+                item['qty']+=qty;item['cost']+=qty*price
+        return [{'id':oid,'pair':pair,'side':side.lower(),'stage':'default','status':'filled',
+                 'total_quantity':str(v['qty']),'remaining_quantity':'0','cancelled_quantity':'0',
+                 'avg_price':str(v['cost']/v['qty']),'created_at':v['stamp']} for oid,v in grouped.items()]
 
     def transactions(self,since):
         result=[]

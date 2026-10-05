@@ -82,6 +82,7 @@ def run(config):
     health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
             'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
+            'short_average_trigger':'0.30','short_average_once':'per_position_including_manual',
             'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -130,7 +131,8 @@ def run(config):
             if not worker.is_alive():
                 failed=True;alerts.emit('SCANNER_ERROR',reason='DATA_WORKER_STOPPED')
             occupied=db.occupied()
-            review=any(t['status'] in ('UNCERTAIN','CONFLICT','CLOSING') for t in occupied)
+            review=any(t['status'] in ('UNCERTAIN','CONFLICT','CLOSING')
+                       or t['data'].get('average_order',{}).get('cancel_unconfirmed') for t in occupied)
             health.update(status='degraded' if failed or health.get('scan_error') else 'review_required' if review else 'ok',
                           active_positions=len(occupied),updated_at=time.time())
             time.sleep(config.poll)

@@ -5,6 +5,7 @@ from .exchange import ExchangeError, quantity, target, short_limit_price
 from .market import decimal
 from .capacity import account_capacity
 from .strategy import long_confirmation
+from .averaging import ShortAverager, RECOVERABLE
 
 D=Decimal
 
@@ -13,6 +14,7 @@ class Engine:
     def __init__(self,config,state,exchange,market,emit):
         self.c,self.db,self.ex,self.market,self.emit=config,state,exchange,market,emit
         self.ledger_at=0
+        self.averager=ShortAverager(self)
 
     def capacity(self):
         return account_capacity(self.ex.all_positions(),self.db.occupied())
@@ -155,7 +157,10 @@ class Engine:
     def reconcile(self,trade):
         ident,pair,d=trade['id'],trade['pair'],trade['data']
         status=trade['status']
-        if status in ('CLOSED','REJECTED','CONFLICT'):return
+        if status in ('CLOSED','REJECTED'):return
+        if status=='CONFLICT' and not (d.get('side')=='SELL' and d.get('position_id') and d.get('reason') in RECOVERABLE):
+            if d.get('average_order'):self.averager.cancel_own(trade,'POSITION_CONFLICT')
+            return
         if status=='RESERVED':
             # Create cannot have been called before the SUBMITTING commit.
             self.db.update(ident,'REJECTED',reason='PREPARATION_INTERRUPTED')
@@ -197,6 +202,13 @@ class Engine:
             event='LIMIT_CANCELLED' if d.get('order_type')=='limit_order' and order['status']!='rejected' else 'ORDER_REJECTED'
             self.emit(event,pair=pair,trade_id=ident,reason=reason);return
         positions=[p for p in self.ex.positions(pair) if decimal(p['active_pos'])!=0]
+        initial_qty=filled
+        fill=None
+        if d['side']=='SELL' and d.get('position_id'):
+            reconciled=self.averager.sync(trade,positions,order,initial_qty)
+            if reconciled is None:return
+            filled,fill=reconciled
+            trade=self.db.get(ident);d=trade['data']
         if not positions:
             if d.get('position_id'):
                 self.db.record_flat(ident,time.time())
@@ -221,10 +233,11 @@ class Engine:
                 self.db.update(ident,'CLOSING',exit_alerted=True)
                 self.emit('EXIT_UNCERTAIN',pair=pair,trade_id=ident)
             return
-        fill=decimal(order.get('avg_price') or p['avg_price'],True)
+        fill=fill if fill is not None else decimal(order.get('avg_price') or p['avg_price'],True)
         pct=self.c.long_tp if d['side']=='BUY' else self.c.short_tp
         tp=target(d['info'],d['side'],fill,pct)
-        self.db.update(ident,'PROTECTING',position_id=p['id'],filled_quantity=str(filled),fill=str(fill),tp=str(tp),tp_pct=str(pct))
+        self.db.update(ident,'PROTECTING',position_id=p['id'],filled_quantity=str(filled),fill=str(fill),tp=str(tp),tp_pct=str(pct),
+                       initial_quantity=str(initial_qty),initial_fill=str(decimal(order.get('avg_price') or p['avg_price'],True)))
         if not d.get('fill_alerted'):
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),
@@ -236,6 +249,7 @@ class Engine:
             exit_price=self.ex.price(pair,'SELL' if d['side']=='BUY' else 'BUY')
             hit=exit_price>=tp if d['side']=='BUY' else exit_price<=tp
             if hit:
+                if d['side']=='SELL' and not self.averager.cancel_own(trade,'TP_EXIT'):return
                 self.db.update(ident,'CLOSING',exit_requested_at=time.time())
                 self.ex.exit(pair,p)
                 self.emit('TP_EXIT_REQUESTED',pair=pair,trade_id=ident);return
@@ -248,6 +262,7 @@ class Engine:
             if decimal(refreshed.get('take_profit_trigger') or 0)!=tp:
                 self.emit('TP_PENDING',pair=pair,trade_id=ident);return
         self.db.update(ident,'OPEN')
+        if d['side']=='SELL':self.averager.maybe_place(self.db.get(ident))
 
     def conflict(self,trade,reason):
         self.db.update(trade['id'],'CONFLICT',reason=reason)
@@ -259,8 +274,9 @@ class Engine:
         matching=[r for r in rows if r.get('pair')==pair and r.get('stage')!='funding'
                   and (not d.get('position_id') or r.get('position_id')==d['position_id'])
                   and 'Order' in r.get('parent_type','')]
-        entries=[r for r in matching if r.get('parent_id')==d.get('order_id')]
-        exits=[r for r in matching if r.get('parent_id')!=d.get('order_id')]
+        entry_ids={d.get('order_id'),d.get('average_order',{}).get('order_id'),*d.get('manual_entries',{})}
+        entries=[r for r in matching if r.get('parent_id') in entry_ids]
+        exits=[r for r in matching if r.get('parent_id') not in entry_ids]
         if not entries or not exits:return
         if any(decimal(p.get(k,0))!=0 for p in self.ex.positions(pair)
                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):return

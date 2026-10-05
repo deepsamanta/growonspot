@@ -81,6 +81,19 @@ class ScannerState:
         with self.conn:
             self.conn.execute('UPDATE scanner_trades SET status=?,data_json=? WHERE id=?',(status,json.dumps(data),trade_id))
 
+    def claim_average(self, trade_id, intent):
+        """Commit the one addition allowance before any create request can leave."""
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            row=self.get(trade_id)
+            if row is None or row['status']!='OPEN' or row['data'].get('averaging_used'):
+                self.conn.rollback();return False
+            data={**row['data'],'averaging_used':True,'averaging_source':'BOT','average_order':intent}
+            self.conn.execute('UPDATE scanner_trades SET data_json=? WHERE id=?',(json.dumps(data),trade_id))
+            self.conn.commit();return True
+        except Exception:
+            self.conn.rollback();raise
+
     def record_flat(self, trade_id, closed_at, realized_pnl=None):
         """Unknown PnL blocks that coin until transaction reconciliation completes."""
         pnl = None if realized_pnl is None else Decimal(str(realized_pnl))
