@@ -41,11 +41,11 @@ class EngineTests(unittest.TestCase):
         self.ex.prepare.assert_called_once_with(PAIR,1,'isolated')
         self.ex.create.assert_called_once_with(PAIR,'BUY',D(20),1,'isolated',D('.329'))
         self.assertEqual(row['data']['estimated_margin'],'6.20')
-    def test_limit_short_crossed_3x_sized_at_resistance(self):
+    def test_limit_short_crossed_3x_sized_at_resistance_plus_two_percent(self):
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.31'),D(36),self.now)}
         self.signal=Candidate(PAIR,'SELL',self.now,D('.312'),int(self.now-200*DAY),D(36))
         self.enter();self.ex.prepare.assert_called_once_with(PAIR,3,'crossed')
-        self.ex.create.assert_called_once_with(PAIR,'SELL',D(28),3,'crossed',D('.290'),limit_price=D('.312'))
+        self.ex.create.assert_called_once_with(PAIR,'SELL',D(28),3,'crossed',D('.296'),limit_price=D('.319'))
     def test_null_legacy_leverage_fields_use_dynamic_tiers(self):
         self.market.metadata.return_value={**INFO,'max_leverage_long':None,'max_leverage_short':None}
         self.assertEqual(self.enter()['status'],'SUBMITTED')

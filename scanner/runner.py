@@ -10,7 +10,7 @@ from .config import ScannerConfig
 from .market import MarketData,MarketDataError,DAY
 from .state import ScannerState
 from .strategy import History,evaluate
-from .exchange import Exchange
+from .exchange import Exchange,SHORT_RESISTANCE_OFFSET
 from .engine import Engine
 from .alerts import Alerts
 from .capacity import account_capacity
@@ -81,6 +81,7 @@ def run(config):
     stopping=threading.Event();outbox=queue.Queue(maxsize=32)
     health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
+            'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
             'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -93,7 +94,7 @@ def run(config):
     server=HTTPServer(('0.0.0.0',config.health_port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
-    alerts.emit('SCANNER_STARTED',enabled=config.enabled,max_positions=5,short='Resistance LIMIT / 3 USDT / 3x / crossed / TP 7%',
+    alerts.emit('SCANNER_STARTED',enabled=config.enabled,max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / TP 7%',
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / TP 6%',stop_loss='none',
                 position_limits='All non-gold positions: 5 total / 3 short / 2 long',long_confirmation='4h consolidation or bullish reversal',
                 short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)

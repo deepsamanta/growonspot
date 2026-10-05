@@ -9,6 +9,7 @@ from .market import MarketDataError, decimal
 
 BASE='https://api.coindcx.com/exchange/v1/derivatives/futures/'
 D=Decimal
+SHORT_RESISTANCE_OFFSET=D('0.02')
 
 
 class ExchangeError(RuntimeError):
@@ -57,8 +58,10 @@ def target(info,side,fill,pct):
 
 
 def short_limit_price(info,resistance,last_price):
+    """Sell limit 2% above resistance, rounded upward to an exchange tick."""
     step=decimal(info['price_increment'],True)
-    price=(decimal(resistance,True)/step).to_integral_value(rounding=ROUND_UP)*step
+    raw=decimal(resistance,True)*(1+SHORT_RESISTANCE_OFFSET)
+    price=(raw/step).to_integral_value(rounding=ROUND_UP)*step
     if not decimal(info['min_price'],True)<=price<=decimal(info['max_price'],True):
         raise ValueError('LIMIT_OUTSIDE_EXCHANGE_PRICE_RANGE')
     # Check both published LTP-based bounds before sending a limit order.

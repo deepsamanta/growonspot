@@ -6,7 +6,7 @@ import time
 import requests
 
 TITLES={'ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
-        'LIMIT_SUBMITTED':'Short limit resting at resistance','LIMIT_CANCEL_REQUESTED':'Entry remainder cancellation requested',
+        'LIMIT_SUBMITTED':'Short limit resting 2% above resistance','LIMIT_CANCEL_REQUESTED':'Entry remainder cancellation requested',
         'LIMIT_CANCELLED':'Unfilled short limit cancelled','CANCEL_UNCERTAIN':'Entry cancellation needs review',
         'ORDER_REJECTED':'Entry rejected','ORDER_UNCERTAIN':'Entry outcome requires review',
         'EXIT_CONFIRMED':'Exit confirmed','TP_EXIT_REQUESTED':'Take-profit exit requested',
