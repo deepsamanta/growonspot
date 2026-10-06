@@ -41,8 +41,8 @@ class ScannerState:
 
     def reserve(self, signal_key, pair, data, max_positions, now=None, side_limits=None):
         """Pending/uncertain submissions occupy slots before exchange writes."""
-        if max_positions < 1 or max_positions > 5:
-            raise ValueError('Scanner position cap must be between 1 and 5')
+        if not isinstance(max_positions,int) or max_positions < 1:
+            raise ValueError('Scanner position cap must be a positive integer')
         if pair == 'B-XAU_USDT' or pair.rsplit('-', 1)[-1].split('_')[0] in ('XAU','XAUUSD'):
             raise ValueError('Gold is reserved for the existing bot')
         now = time.time() if now is None else now
@@ -119,6 +119,12 @@ class ScannerState:
         with self.conn:
             self.conn.execute('INSERT INTO scanner_cache VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET data_json=excluded.data_json,updated_at=excluded.updated_at',
                               (key,json.dumps(data),time.time()))
+
+    def balance_baseline(self, balance):
+        with self.conn:
+            self.conn.execute('INSERT OR IGNORE INTO scanner_cache VALUES(?,?,?)',
+                              ('capacity:baseline',json.dumps({'balance':str(balance)}),time.time()))
+        return Decimal(self.cache('capacity:baseline')['balance'])
 
     def lock_profit(self, pair, when, trade_id=0):
         with self.conn:

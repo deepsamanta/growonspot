@@ -13,17 +13,18 @@ from .strategy import History,evaluate
 from .exchange import Exchange,SHORT_RESISTANCE_OFFSET
 from .engine import Engine
 from .alerts import Alerts
-from .capacity import account_capacity
+from .capacity import BalanceCapacity
 
 
 def scan(config,outbox,health,emit,stopping):
     db=ScannerState(config.database,config.timezone);market=MarketData();history=History(market,db)
     exchange=Exchange(config,market)
+    balance_capacity=BalanceCapacity(exchange,db)
     while not stopping.is_set():
         started=time.time()
         try:
             # Capacity must be confirmed before discovery, quotes or candles.
-            capacity=account_capacity(exchange.all_positions(),db.occupied())
+            capacity=balance_capacity.get()
             checked=time.time()
             health.update(account_capacity=capacity.report(),capacity_checked=checked,scan_error=None)
             if not config.enabled or not (capacity.allows('BUY') or capacity.allows('SELL')):
@@ -35,7 +36,7 @@ def scan(config,outbox,health,emit,stopping):
             for index,pair in enumerate(instruments):
                 if stopping.is_set():break
                 if time.time()-checked>15:
-                    capacity=account_capacity(exchange.all_positions(),db.occupied());checked=time.time()
+                    capacity=balance_capacity.get();checked=time.time()
                 if not (capacity.allows('BUY') or capacity.allows('SELL')):
                     health.update(scan_paused_reason='ACCOUNT_POSITION_LIMIT');break
                 health.update(scan_progress=index,scan_updated=time.time())
@@ -82,7 +83,8 @@ def run(config):
     health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
             'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
-            'short_average_trigger':'0.30','short_average_once':'per_position_including_manual',
+            'short_average_trigger':'0.30','short_average_once':'per_cycle_including_manual',
+            'short_tp_split':'75% at 7%; remainder at 20%','balance_slot_step_usdt':'50',
             'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -95,9 +97,9 @@ def run(config):
     server=HTTPServer(('0.0.0.0',config.health_port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
-    alerts.emit('SCANNER_STARTED',enabled=config.enabled,max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / TP 7%',
+    alerts.emit('SCANNER_STARTED',enabled=config.enabled,base_max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / TP 75% at 7%, rest at 20%',
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / TP 6%',stop_loss='none',
-                position_limits='All non-gold positions: 5 total / 3 short / 2 long',long_confirmation='4h consolidation or bullish reversal',
+                position_limits='Base: 5 total / 3 short / 2 long; +1 slot each $50 growth, alternating short/long',long_confirmation='4h consolidation or bullish reversal',
                 short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)
     try:
         while True:
@@ -112,7 +114,9 @@ def run(config):
                                 reason=str(error) if hasattr(error,'endpoint') else '')
             try:
                 capacity=engine.capacity()
-                health.update(account_capacity=capacity.report(),capacity_checked=time.time())
+                health.update(account_capacity=capacity.report(),capacity_checked=time.time(),
+                              wallet_balance=str(engine.balanced_capacity.balance),
+                              wallet_baseline=db.cache('capacity:baseline')['balance'])
             except Exception as error:
                 failed=True;alerts.emit('SCANNER_ERROR',reason='ACCOUNT_CAPACITY_UNAVAILABLE',error_type=type(error).__name__)
             for _ in range(outbox.qsize()):

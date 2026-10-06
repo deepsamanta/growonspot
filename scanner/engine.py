@@ -3,9 +3,10 @@ import time
 from decimal import Decimal
 from .exchange import ExchangeError, quantity, target, short_limit_price
 from .market import decimal
-from .capacity import account_capacity
+from .capacity import BalanceCapacity
 from .strategy import long_confirmation
 from .averaging import ShortAverager, RECOVERABLE
+from .short_tp import ShortTakeProfit, split_plan
 
 D=Decimal
 
@@ -15,9 +16,11 @@ class Engine:
         self.c,self.db,self.ex,self.market,self.emit=config,state,exchange,market,emit
         self.ledger_at=0
         self.averager=ShortAverager(self)
+        self.balanced_capacity=BalanceCapacity(exchange,state)
+        self.short_tp=ShortTakeProfit(self)
 
     def capacity(self):
-        return account_capacity(self.ex.all_positions(),self.db.occupied())
+        return self.balanced_capacity.get()
 
     def ledger(self,since):
         rows=self.ex.transactions(since)
@@ -72,6 +75,7 @@ class Engine:
         sizing_price=max(limit or price,quote.price,quote.mark_price or quote.price)
         minimum_price=min(price,quote.price,quote.mark_price or quote.price)
         qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
+        if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit)
         tp=target(info,side,limit or price,pct)
         if any(decimal(p.get(k,0))!=0 for p in self.ex.positions(pair)
                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):return
@@ -90,7 +94,7 @@ class Engine:
               'expires_at':now+self.c.short_limit_seconds if limit is not None else None,
               'confirmation':confirmation if side=='BUY' else 'WEEKLY_RESISTANCE','info':info}
         key=f'{pair}:{side}:{int(candidate.observed_at//300)}'
-        ident,reason=self.db.reserve(key,pair,data,self.c.max_positions,now,{'BUY':2,'SELL':3})
+        ident,reason=self.db.reserve(key,pair,data,capacity.max_total,now,{'BUY':capacity.max_longs,'SELL':capacity.max_shorts})
         if ident is None:
             self.emit('ENTRY_SKIPPED',pair=pair,reason=reason);return
         submitted=False
@@ -114,6 +118,7 @@ class Engine:
             sizing_price=max(limit or price,latest.price,latest.mark_price or latest.price)
             minimum_price=min(price,latest.price,latest.mark_price or latest.price)
             qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
+            if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit)
             tp=target(info,side,limit or price,pct)
             self.db.update(ident,'RESERVED',quantity=str(qty),tp=str(tp),market_price=str(price),
                            estimated_margin=str(qty*sizing_price/leverage),submitted_at=time.time(),
@@ -167,6 +172,9 @@ class Engine:
             self.emit('ORDER_REJECTED',pair=pair,trade_id=ident,reason='PREPARATION_INTERRUPTED');return
         if status=='PNL_PENDING':
             self.reconcile_pnl(trade);return
+        if d['side']=='SELL' and self.c.short_split_tp:
+            if not self.short_tp.prepare(trade):return
+            trade=self.db.get(ident);d=trade['data']
         if not d.get('order_id'):
             if status!='UNCERTAIN':
                 self.db.update(ident,'UNCERTAIN');self.emit('ORDER_UNCERTAIN',pair=pair,trade_id=ident)
@@ -241,9 +249,12 @@ class Engine:
         if not d.get('fill_alerted'):
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),
-                      fill=str(fill),tp=str(tp),leverage=d['leverage'],mode=d['mode'],margin=str(filled*fill/d['leverage']))
+                      fill=str(fill),tp=str(tp),leverage=d['leverage'],mode=d['mode'],margin=str(filled*fill/d['leverage']),
+                      profit_plan='75% at 7%, remainder at 20%' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
         if decimal(p.get('stop_loss_trigger') or 0)!=0:
             self.conflict(self.db.get(ident),'UNEXPECTED_EXISTING_STOP_LOSS');return
+        if d['side']=='SELL' and self.c.short_split_tp and self.short_tp.manage(self.db.get(ident),p):
+            self.averager.maybe_place(self.db.get(ident));return
         if decimal(p.get('take_profit_trigger') or 0)!=tp:
             # If the requested profit is already executable, take it once at market.
             exit_price=self.ex.price(pair,'SELL' if d['side']=='BUY' else 'BUY')
@@ -274,7 +285,8 @@ class Engine:
         matching=[r for r in rows if r.get('pair')==pair and r.get('stage')!='funding'
                   and (not d.get('position_id') or r.get('position_id')==d['position_id'])
                   and 'Order' in r.get('parent_type','')]
-        entry_ids={d.get('order_id'),d.get('average_order',{}).get('order_id'),*d.get('manual_entries',{})}
+        entry_ids={d.get('order_id'),d.get('average_order',{}).get('order_id'),*d.get('manual_entries',{}),
+                   *[a.get('order_id') for a in d.get('average_history',[])]}
         entries=[r for r in matching if r.get('parent_id') in entry_ids]
         exits=[r for r in matching if r.get('parent_id') not in entry_ids]
         if not entries or not exits:return

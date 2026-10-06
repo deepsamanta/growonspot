@@ -17,13 +17,13 @@ class EngineTests(unittest.TestCase):
         self.ex=Mock();self.market=Mock();self.emit=Mock();self.now=time.time()
         self.ex.price.return_value=D('.31');self.ex.positions.return_value=[];self.ex.orders.return_value=[]
         self.ex.transactions.return_value=[];self.ex.create.return_value='order1'
-        self.ex.all_positions.return_value=[]
+        self.ex.wallet_balance.return_value=D(50);self.ex.all_positions.return_value=[]
         end=int(self.now//14400)*14400
         self.market.four_hour.return_value=[Candle(t,D('.31'),D('.311'),D('.30'),D('.31'),D(1)) for t in range(end-6*14400,end,14400)]
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.31'),D(1),self.now,D('.30'))}
         self.market.metadata.return_value={**INFO,'max_leverage_long':3,'max_leverage_short':3}
         self.market.eligible_metadata.return_value=True
-        self.c=ScannerConfig(enabled=True)
+        self.c=ScannerConfig(enabled=True,short_split_tp=False)
         self.e=Engine(self.c,self.db,self.ex,self.market,self.emit)
         self.signal=Candidate(PAIR,'BUY',self.now,D('.30'),int(self.now-200*DAY),D(1))
     def tearDown(self):self.db.conn.close();self.tmp.cleanup()

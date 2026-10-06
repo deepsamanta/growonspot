@@ -1,5 +1,6 @@
 """Account-wide non-gold capacity, including durable in-flight entries."""
 from dataclasses import dataclass
+import time
 from .market import decimal, GOLD
 
 
@@ -26,10 +27,11 @@ class Capacity:
 
     def report(self):
         return {'total':len(self.pairs),'longs':len(self.longs),'shorts':len(self.shorts),
+                'max_total':self.max_total,'max_longs':self.max_longs,'max_shorts':self.max_shorts,
                 'long_available':self.allows('BUY'),'short_available':self.allows('SELL')}
 
 
-def account_capacity(positions, reservations):
+def account_capacity(positions, reservations, limits=(5,2,3)):
     pairs,longs,shorts=set(),set(),set()
     for p in positions:
         pair=p['pair']
@@ -47,4 +49,21 @@ def account_capacity(positions, reservations):
         side=row['data'].get('side')
         if side!='SELL':longs.add(pair)
         if side!='BUY':shorts.add(pair)
-    return Capacity(frozenset(pairs),frozenset(longs),frozenset(shorts))
+    return Capacity(frozenset(pairs),frozenset(longs),frozenset(shorts),*limits)
+
+
+class BalanceCapacity:
+    """Each $50 above a durable baseline adds a slot: short, long, short, long."""
+    def __init__(self,exchange,state):
+        self.ex,self.db=exchange,state
+        self.checked=0;self.balance=None
+
+    def get(self):
+        positions=self.ex.all_positions()  # Before any instrument discovery.
+        if self.balance is None or time.time()-self.checked>=15:
+            self.balance=decimal(self.ex.wallet_balance())
+            if self.balance<0:raise ValueError('Invalid wallet balance')
+            self.checked=time.time()
+        baseline=self.db.balance_baseline(self.balance)
+        extra=int(max(0,self.balance-baseline)//50)
+        return account_capacity(positions,self.db.occupied(),(5+extra,2+extra//2,3+(extra+1)//2))

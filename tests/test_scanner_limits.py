@@ -46,7 +46,7 @@ class CapacityTests(unittest.TestCase):
     def test_scanner_checks_account_before_any_coin_discovery(self):
         with tempfile.TemporaryDirectory() as f:
             stop=threading.Event();stop.wait=Mock(side_effect=lambda _:stop.set())
-            ex=Mock();ex.all_positions.return_value=[position(f'B-C{i}_USDT',1) for i in range(6)]
+            ex=Mock();ex.wallet_balance.return_value=D(50);ex.all_positions.return_value=[position(f'B-C{i}_USDT',1) for i in range(6)]
             market=Mock();health={}
             with patch('scanner.runner.Exchange',return_value=ex),patch('scanner.runner.MarketData',return_value=market):
                 scan(ScannerConfig(database=f+'/db',enabled=True),Mock(),health,Mock(),stop)

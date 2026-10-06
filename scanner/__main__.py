@@ -23,6 +23,7 @@ def main():
         config=ScannerConfig();config.validate();ex=Exchange(config,market)
         from .capacity import account_capacity
         result['account_capacity']=account_capacity(ex.all_positions(),[]).report()
+        result['total_usdt_wallet_balance']=str(ex.wallet_balance())
         ex.orders('B-ETH_USDT','BUY')
         import time
         transactions=ex.transactions(time.time()-86400)

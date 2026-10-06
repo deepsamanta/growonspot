@@ -16,13 +16,13 @@ class ShortLimitTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.db=ScannerState(self.tmp.name+'/db')
         self.now=time.time();self.ex=Mock();self.market=Mock();self.emit=Mock()
-        self.ex.all_positions.return_value=[];self.ex.positions.return_value=[];self.ex.orders.return_value=[]
+        self.ex.wallet_balance.return_value=D(50);self.ex.all_positions.return_value=[];self.ex.positions.return_value=[];self.ex.orders.return_value=[]
         self.ex.transactions.return_value=[];self.ex.price.return_value=D('.95');self.ex.create.return_value='entry1'
         self.ex.recent_entries.return_value=[]
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.95'),D(36),self.now,D('.7'),D('.95'))}
         self.market.metadata.return_value={**INFO,'max_leverage_short':None,'order_types':['limit_order','market_order']}
         self.market.eligible_metadata.return_value=True
-        self.config=ScannerConfig(enabled=True);self.engine=Engine(self.config,self.db,self.ex,self.market,self.emit)
+        self.config=ScannerConfig(enabled=True,short_split_tp=False);self.engine=Engine(self.config,self.db,self.ex,self.market,self.emit)
         self.candidate=Candidate(PAIR,'SELL',self.now,D(1),int(self.now-200*DAY),D(36))
     def tearDown(self):self.db.conn.close();self.tmp.cleanup()
     def submit(self):

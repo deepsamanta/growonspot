@@ -78,12 +78,14 @@ class Exchange:
         self.c,self.market=config,market
         self.http=session or requests.Session()
 
-    def request(self,path,body,read=False):
+    def request(self,path,body,read=False,method='POST'):
+        if method not in ('GET','POST') or method=='GET' and not read:raise ValueError('Invalid request method')
         for attempt in range(3 if read else 1):
             payload=json.dumps({**body,'timestamp':int(time.time()*1000)},separators=(',',':'))
             signature=hmac.new(self.c.secret.encode(),payload.encode(),hashlib.sha256).hexdigest()
             try:
-                r=self.http.post(BASE+path,data=payload,headers={'Content-Type':'application/json',
+                send=self.http.get if method=='GET' else self.http.post
+                r=send(BASE+path,data=payload,headers={'Content-Type':'application/json',
                     'X-AUTH-APIKEY':self.c.key,'X-AUTH-SIGNATURE':signature},timeout=(5,15))
                 if not r.ok:
                     if read and attempt<2 and (r.status_code==429 or r.status_code>=500):
@@ -127,6 +129,14 @@ class Exchange:
     def all_positions(self):
         return [p for page in self.pages('positions',{}) for p in page]
 
+    def wallet_balance(self):
+        details=self.request('positions/cross_margin_details',{},read=True,method='GET')
+        if not isinstance(details,dict) or 'total_wallet_balance' not in details:
+            raise ExchangeError('Total USDT wallet balance unavailable','positions/cross_margin_details')
+        value=decimal(details['total_wallet_balance'])
+        if value<0:raise ExchangeError('Invalid total USDT wallet balance','positions/cross_margin_details')
+        return value
+
     def orders(self,pair,side,status='open,partially_filled,untriggered'):
         nongold(pair)
         return [o for page in self.pages('orders',{'side':side.lower(),'status':status}) for o in page if o.get('pair')==pair]
@@ -148,20 +158,22 @@ class Exchange:
         history can be enormous. No order-history sorting assumption is needed.
         The caller separately verifies each addition against the position ledger.
         """
-        nongold(pair)
-        start=datetime.fromtimestamp(since,timezone.utc).date().isoformat()
-        end=(datetime.now(timezone.utc)+timedelta(days=1)).date().isoformat()
         grouped={}
-        for page in self.pages('trades',{'pair':pair,'from_date':start,'to_date':end}):
-            for fill in page:
-                if (float(fill['timestamp'])/1000<since or fill.get('pair')!=pair
-                        or fill.get('side')!=side.lower()):continue
-                oid=fill['order_id'];qty=decimal(fill['quantity'],True);price=decimal(fill['price'],True)
-                item=grouped.setdefault(oid,{'qty':D(0),'cost':D(0),'stamp':float(fill['timestamp'])})
-                item['qty']+=qty;item['cost']+=qty*price
+        for fill in self.trade_fills(pair,since):
+            if fill['side']!=side.lower():continue
+            oid=fill['order_id'];qty=decimal(fill['quantity'],True);price=decimal(fill['price'],True)
+            item=grouped.setdefault(oid,{'qty':D(0),'cost':D(0),'stamp':float(fill['timestamp'])})
+            item['qty']+=qty;item['cost']+=qty*price
         return [{'id':oid,'pair':pair,'side':side.lower(),'stage':'default','status':'filled',
                  'total_quantity':str(v['qty']),'remaining_quantity':'0','cancelled_quantity':'0',
                  'avg_price':str(v['cost']/v['qty']),'created_at':v['stamp']} for oid,v in grouped.items()]
+
+    def trade_fills(self,pair,since):
+        nongold(pair)
+        start=datetime.fromtimestamp(since,timezone.utc).date().isoformat()
+        end=(datetime.now(timezone.utc)+timedelta(days=1)).date().isoformat()
+        return [f for page in self.pages('trades',{'pair':pair,'from_date':start,'to_date':end}) for f in page
+                if f.get('pair')==pair and float(f['timestamp'])/1000>=since]
 
     def transactions(self,since):
         result=[]
@@ -220,6 +232,17 @@ class Exchange:
         nongold(pair)
         if order.get('pair')!=pair:raise ExchangeError('Cancel ownership mismatch')
         self.request('orders/cancel',{'id':order['id']})
+
+    def partial_short_exit(self,pair,qty,leverage):
+        nongold(pair)
+        order={'pair':pair,'side':'buy','order_type':'market_order','price':None,
+               'total_quantity':float(decimal(qty,True)),'leverage':leverage,'position_margin_type':'crossed',
+               'margin_currency_short_name':'USDT','notification':'no_notification'}
+        result=self.request('orders/create',{'order':order})
+        rows=result if isinstance(result,list) else result.get('order',[]) if isinstance(result,dict) else []
+        if isinstance(rows,dict):rows=[rows]
+        if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous partial exit acknowledgement','orders/create')
+        return rows[0]['id']
 
     def take_profit(self,pair,position,tp):
         nongold(pair)

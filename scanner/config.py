@@ -19,6 +19,8 @@ class ScannerConfig:
     short_margin: Decimal = Decimal('3')
     short_leverage: int = 3
     short_tp: Decimal = Decimal('.07')
+    short_split_tp: bool = True
+    short_runner_tp: Decimal = Decimal('.20')
     short_distance: Decimal = Decimal(os.getenv('SCANNER_SHORT_DISTANCE','0.10'))
     short_limit_seconds: int = int(os.getenv('SCANNER_SHORT_LIMIT_SECONDS','14400'))
     long_margin: Decimal = Decimal('6')

@@ -1,7 +1,7 @@
 """One durable short addition per position, including manual same-side orders."""
 import time
 from decimal import Decimal
-from .exchange import ExchangeError, nongold, short_limit_price, target
+from .exchange import ExchangeError, nongold, short_limit_price, target, quantity
 from .market import decimal
 from .strategy import History, weekly_resistances
 
@@ -9,7 +9,8 @@ D=Decimal
 TRIGGER=D('.30')
 TERMINAL={'filled','cancelled','partially_cancelled','rejected'}
 RECOVERABLE={'POSITION_QUANTITY_OR_ID_CHANGED','AVERAGE_POSITION_MISMATCH',
-             'MANUAL_ADDITION_UNVERIFIED','POSITION_CHANGED_DURING_TP_UPDATE'}
+             'MANUAL_ADDITION_UNVERIFIED','POSITION_CHANGED_DURING_TP_UPDATE','SHORT_FILL_LEDGER_MISMATCH',
+             'PARTIAL_TP_INCOMPLETE_OR_POSITION_CHANGED'}
 
 
 def filled_quantity(order):
@@ -84,12 +85,15 @@ class ShortAverager:
         self.db.update(ident,trade['status'],initial_quantity=str(initial_qty),initial_fill=str(initial_fill))
         own=d.get('average_order',{})
         own_id=own.get('order_id')
-        pending=[o for o in self.ex.orders(pair,'SELL') if o.get('id') not in (d['order_id'],own_id)
+        bot_ids={d['order_id'],own_id,*[a.get('order_id') for a in d.get('average_history',[])]}
+        pending=[o for o in self.ex.orders(pair,'SELL') if o.get('id') not in bot_ids
                  and o.get('stage')=='default' and o.get('side')=='sell']
         recent=self.ex.recent_entries(pair,'SELL',d['submitted_at']-2)
-        external={o['id']:o for o in recent if o['id'] not in (d['order_id'],own_id) and filled_quantity(o)>0}
-        if pending or external:
-            self.manual(trade,[o['id'] for o in pending]+list(external),'MANUAL_ENTRY_ORDER')
+        external={o['id']:o for o in recent if o['id'] not in bot_ids and filled_quantity(o)>0}
+        baseline=d.get('manual_cycle_baseline',{})
+        additions=[oid for oid,o in external.items() if filled_quantity(o)>decimal(baseline.get(oid) or 0)]
+        if pending or additions:
+            self.manual(trade,[o['id'] for o in pending]+additions,'MANUAL_ENTRY_ORDER')
         # An unexplained increase also blocks an addition while order/ledger APIs catch up.
         previously_known=decimal(d.get('filled_quantity') or initial_qty)
         if (len(positions)==1 and positions[0]['id']==d['position_id']
@@ -109,7 +113,7 @@ class ShortAverager:
                 if own_order is None:
                     self.db.update(ident,'UNCERTAIN');return None
                 own_qty=filled_quantity(own_order)
-                if (decimal(own_order['total_quantity'])!=decimal(own['quantity']) or own_qty>initial_qty):
+                if (decimal(own_order['total_quantity'])!=decimal(own['quantity']) or own_qty>decimal(own['quantity'])):
                     self.e.conflict(trade,'UNEXPECTED_AVERAGE_FILL');return None
                 own_fill=decimal(own_order.get('avg_price') or 0)
                 self.save_order(trade,status=own_order['status'],filled_quantity=str(own_qty),avg_price=str(own_fill))
@@ -140,6 +144,15 @@ class ShortAverager:
         qty=initial_qty+own_qty+sum((decimal(v['quantity']) for v in known.values()),D(0))
         cost=initial_qty*initial_fill+own_qty*own_fill+sum((decimal(v['quantity'])*decimal(v['fill']) for v in known.values()),D(0))
         expected_fill=cost/qty
+        if positions and d.get('tp1_orders'):
+            from .short_tp import replay_short
+            try:
+                qty,expected_fill=replay_short(self.ex.trade_fills(pair,d['submitted_at']-2),
+                    bot_ids|set(known),{o.get('order_id') for o in d['tp1_orders']})
+                if qty<=0:raise ValueError('SHORT_ALREADY_CLOSED')
+            except ValueError as error:
+                self.cancel_own(trade,'POSITION_CHANGED')
+                self.e.conflict(trade,'SHORT_FILL_LEDGER_MISMATCH');return None
         if positions:
             p=positions[0]
             tolerance=max(decimal(d['info']['price_increment'],True),expected_fill*D('.00000001'))
@@ -165,7 +178,8 @@ class ShortAverager:
         nongold(pair)
         if not self.e.capacity().within_limits:return
         price=self.ex.price(pair,'SELL')
-        initial_fill=decimal(d['initial_fill'],True);qty=decimal(d['initial_quantity'],True)
+        initial_fill=decimal(d.get('average_reference') or d['initial_fill'],True)
+        qty=decimal(d['initial_quantity'],True);current_qty=decimal(d['filled_quantity'],True)
         if price<=initial_fill*(1+TRIGGER):return
         # Resistance history is cached daily; reevaluate a missing level at most once a minute.
         if now-self.checked.get(trade['id'],0)<60:return
@@ -184,23 +198,29 @@ class ShortAverager:
         if (price<=initial_fill*(1+TRIGGER) or not resistance*(1-self.c.short_distance)<=current<resistance):return
         limit=short_limit_price(info,resistance,latest.price)
         try:
-            validate_quantity(info,qty,limit,qty,d['leverage'],min(price,latest.price,latest.mark_price or latest.price))
+            minimum_price=min(price,latest.price,latest.mark_price or latest.price)
+            if d.get('average_margin_mode'):
+                qty=quantity(info,limit,self.c.short_margin,d['leverage'],minimum_price=minimum_price)
+            validate_quantity(info,qty,limit,current_qty,d['leverage'],minimum_price)
         except ValueError as error:
             self.emit('AVERAGE_SKIPPED',pair=pair,trade_id=trade['id'],reason=str(error));return
         # Check manual orders and quantity again after potentially slow history/API reads.
         original=self.ex.find_order(pair,'SELL',d['order_id'])
         if original is None:return
         positions=[p for p in self.ex.positions(pair) if decimal(p.get('active_pos') or 0)!=0]
-        result=self.sync(self.db.get(trade['id']),positions,original,qty)
+        original_qty=filled_quantity(original)
+        result=self.sync(self.db.get(trade['id']),positions,original,original_qty)
         refreshed=self.db.get(trade['id'])
-        if result is None or not positions or result[0]!=qty or refreshed['data'].get('averaging_used'):return
+        if result is None or not positions or result[0]!=current_qty or refreshed['data'].get('averaging_used'):return
         if not self.e.capacity().within_limits:return
         final_positions=[p for p in self.ex.positions(pair) if decimal(p.get('active_pos') or 0)!=0]
         if (len(final_positions)!=1 or final_positions[0]['id']!=d['position_id']
-                or decimal(final_positions[0]['active_pos'])!=-qty
+                or decimal(final_positions[0]['active_pos'])!=-current_qty
+                or decimal(final_positions[0]['avg_price'])!=result[1]
                 or final_positions[0].get('margin_type')!=d['mode']
                 or decimal(final_positions[0].get('leverage') or 0)!=d['leverage']):return
-        manual_pending=[o for o in self.ex.orders(pair,'SELL') if o.get('id')!=d['order_id']
+        bot_ids={d['order_id'],*[a.get('order_id') for a in d.get('average_history',[])]}
+        manual_pending=[o for o in self.ex.orders(pair,'SELL') if o.get('id') not in bot_ids
                         and o.get('side')=='sell' and o.get('stage')=='default']
         if manual_pending:
             self.manual(trade,[o['id'] for o in manual_pending],'MANUAL_ENTRY_BEFORE_SUBMISSION');return

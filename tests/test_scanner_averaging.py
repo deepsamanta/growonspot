@@ -16,7 +16,7 @@ from test_scanner_strategy import INFO,PAIR,bars
 class AveragingTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.path=self.tmp.name+'/db';self.db=ScannerState(self.path)
-        self.now=time.time();self.c=ScannerConfig(enabled=True);self.ex=Mock();self.market=Mock();self.emit=Mock()
+        self.now=time.time();self.c=ScannerConfig(enabled=True,short_split_tp=False);self.ex=Mock();self.market=Mock();self.emit=Mock()
         self.info={**INFO,'price_increment':'.0001'}
         data={'side':'SELL','order_id':'first','position_id':'position','quantity':'17','filled_quantity':'17',
               'fill':'.5264','initial_fill':'.5264','initial_quantity':'17','info':self.info,'leverage':3,
@@ -30,7 +30,7 @@ class AveragingTests(unittest.TestCase):
         self.orders={'first':self.first}
         self.ex.find_order.side_effect=lambda pair,side,oid:self.orders.get(oid)
         self.ex.positions.return_value=[self.p];self.ex.all_positions.return_value=[self.p]
-        self.ex.orders.return_value=[];self.ex.recent_entries.return_value=[];self.ex.transactions.return_value=[]
+        self.ex.wallet_balance.return_value=D(50);self.ex.orders.return_value=[];self.ex.recent_entries.return_value=[];self.ex.transactions.return_value=[]
         self.ex.create.return_value='addition';self.ex.price.return_value=D('.70')
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.70'),D(0),self.now,D('.6'),D('.70'))}
         self.market.metadata.return_value=self.info;self.market.eligible_metadata.return_value=True
@@ -130,7 +130,7 @@ class AveragingTests(unittest.TestCase):
         self.assertEqual(self.p['take_profit_trigger'],'0.5609');self.ex.create.assert_not_called()
         self.reset_engine();self.poll();self.ex.create.assert_not_called()
     def test_pending_manual_order_blocks_even_before_fill_and_after_cancellation(self):
-        self.manual(pending=True);self.poll();self.ex.orders.return_value=[];self.reset_engine();self.poll()
+        self.manual(pending=True);self.poll();self.ex.wallet_balance.return_value=D(50);self.ex.orders.return_value=[];self.reset_engine();self.poll()
         self.ex.create.assert_not_called();self.ex.cancel.assert_not_called()
         self.assertTrue(self.row()['data']['averaging_used'])
     def test_manual_pending_cancels_only_own_pending_average(self):
