@@ -6,7 +6,7 @@ from .market import decimal
 from .strategy import History, weekly_resistances
 
 D=Decimal
-TRIGGER=D('.30')
+TRIGGER=D('.35')
 TERMINAL={'filled','cancelled','partially_cancelled','rejected'}
 RECOVERABLE={'POSITION_QUANTITY_OR_ID_CHANGED','AVERAGE_POSITION_MISMATCH',
              'MANUAL_ADDITION_UNVERIFIED','POSITION_CHANGED_DURING_TP_UPDATE','SHORT_FILL_LEDGER_MISMATCH',

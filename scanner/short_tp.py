@@ -1,21 +1,35 @@
-"""Durable 75%/25% short profit lifecycle; no unsupported reduce-only fields."""
+"""Durable staged short profits, including minimum-size partial exits."""
 import time
-from decimal import Decimal,ROUND_DOWN
+from decimal import Decimal,ROUND_DOWN,ROUND_UP
 from .market import decimal
 from .exchange import target,ExchangeError
-from .averaging import TERMINAL,filled_quantity
+from .averaging import TERMINAL,TRIGGER,filled_quantity
 
 D=Decimal
 
 
-def split_plan(info,qty,fill):
+def partial_quantity(info,qty,price,preferred=None):
+    """Keep the planned split when valid; otherwise use the smallest valid close."""
     step=decimal(info['quantity_increment'],True)
-    part=(qty*D('.75')/step).to_integral_value(rounding=ROUND_DOWN)*step
+    minimum=max(decimal(info['min_quantity'],True),decimal(info.get('min_trade_size',info['min_quantity']),True))
+    minimum=(minimum/step).to_integral_value(rounding=ROUND_UP)*step
+    min_notional=decimal(info['min_notional'],True)
+    maximum=min(decimal(info['max_market_order_quantity'],True),decimal(info['max_quantity'],True))
+    part=(qty*D('.75')/step).to_integral_value(rounding=ROUND_DOWN)*step if preferred is None else preferred
+    if qty<=0 or qty%step or part%step:raise ValueError('INVALID_SHORT_SPLIT_QUANTITY')
+    if part>maximum:raise ValueError('SHORT_PARTIAL_EXCEEDS_MAXIMUM_QUANTITY')
+    if part>=minimum and qty-part>=minimum and part*price>=min_notional:
+        return part
+    part=(max(minimum,min_notional/decimal(price,True))/step).to_integral_value(rounding=ROUND_UP)*step
+    # The native full-position TP closes the remainder, even below min notional.
+    if part>maximum:raise ValueError('SHORT_PARTIAL_EXCEEDS_MAXIMUM_QUANTITY')
+    if qty-part<minimum:raise ValueError('SHORT_TOO_SMALL_FOR_MINIMUM_PARTIAL_TP')
+    return part
+
+
+def split_plan(info,qty,fill):
     tp1=target(info,'SELL',fill,D('.07'));tp2=target(info,'SELL',fill,D('.20'))
-    minimum=decimal(info['min_quantity'],True)
-    if (part<minimum or qty-part<minimum or part*tp1<decimal(info['min_notional'],True)
-            or part>decimal(info['max_market_order_quantity'],True)):
-        raise ValueError('SHORT_TOO_SMALL_FOR_75_PERCENT_TP')
+    part=partial_quantity(info,qty,tp1)
     return {'base_quantity':str(qty),'reference':str(fill),'tp1_quantity':str(part),
             'tp1':str(tp1),'tp2':str(tp2),'phase':'waiting'}
 
@@ -150,7 +164,7 @@ class ShortTakeProfit:
                        average_margin_mode=True)
         self.emit('PARTIAL_TP_FILLED',pair=trade['pair'],trade_id=trade['id'],
                   closed_quantity=s['tp1_quantity'],remaining_quantity=s['runner_quantity'],
-                  remaining_tp=s['tp2'],averaging='Rearmed: 3 USDT margin / 3x after +30%')
+                  remaining_tp=s['tp2'],averaging=f'Rearmed: 3 USDT margin / 3x after +{TRIGGER*100:g}%')
 
     def manage(self,trade,p):
         """True owns the split lifecycle; False preserves legacy TP for undersized positions."""
@@ -182,6 +196,11 @@ class ShortTakeProfit:
             self.arm_runner(trade,p,tp2);return True
         if ask>tp1:
             self.arm_runner(trade,p,tp2);return True
+        # An unsplittable price gap must not repeatedly cancel/recreate the native TP.
+        try:partial_quantity(d['info'],qty,ask,preferred=decimal(s['tp1_quantity']))
+        except ValueError as error:
+            self.arm_runner(trade,p,tp2)
+            self.emit('PARTIAL_TP_WAITING',pair=pair,trade_id=ident,reason=str(error));return True
         if not self.e.averager.cancel_own(trade,'PARTIAL_TP_EXIT'):return True
         if not self.cancel_native(trade,p,self.ex.orders(pair,'BUY')):return True
         # Recheck quantity, mode, price and other orders after cancellation/API latency.
@@ -193,11 +212,16 @@ class ShortTakeProfit:
         if self.ex.orders(pair,'BUY'):return True
         ask=self.ex.price(pair,'BUY')
         part=decimal(s['tp1_quantity'])
+        if ask<=tp2:
+            self.arm_runner(trade,p,tp2);return True
         if ask>tp1:
             self.arm_runner(trade,p,tp2);return True
-        if part*ask<decimal(d['info']['min_notional'],True):
+        try:part=partial_quantity(d['info'],qty,ask,preferred=part)
+        except ValueError as error:
             self.arm_runner(trade,p,tp2)
-            self.emit('PARTIAL_TP_WAITING',pair=pair,trade_id=ident,reason='PARTIAL_EXIT_BELOW_MIN_NOTIONAL');return True
+            self.emit('PARTIAL_TP_WAITING',pair=pair,trade_id=ident,reason=str(error));return True
+        # Persist any minimum-size adjustment with the intent, before the API call.
+        s={**s,'tp1_quantity':str(part)}
         intent={'status':'submitting','quantity':str(part),'submitted_at':time.time(),'cycle':s['cycle']}
         items=list(self.db.get(ident)['data'].get('tp1_orders',[]))+[intent]
         self.db.update(ident,'PROTECTING',tp1_orders=items,short_tp={**s,'phase':'closing'})

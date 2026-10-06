@@ -7,7 +7,7 @@ from unittest.mock import Mock,patch
 from scanner.capacity import BalanceCapacity
 from scanner.exchange import Exchange,ExchangeError
 from scanner.state import ScannerState
-from scanner.short_tp import split_plan,replay_short
+from scanner.short_tp import split_plan,partial_quantity,replay_short
 import test_scanner_averaging as fixtures
 from test_scanner_strategy import INFO,PAIR,bars
 from scanner.market import Quote
@@ -20,7 +20,7 @@ class SplitTests(unittest.TestCase):
     def setUp(self):
         fixtures.AveragingTests.setUp(self)
         self.c=replace(self.c,short_split_tp=True)
-        self.info={**self.info,'quantity_increment':'.1','min_quantity':'.1'}
+        self.info={**self.info,'quantity_increment':'.1','min_quantity':'.1','min_trade_size':'.1'}
         self.db.update(self.ident,'OPEN',info=self.info)
         self.market.metadata.return_value=self.info
         self.reset_engine();self.price('.55')
@@ -51,6 +51,9 @@ class SplitTests(unittest.TestCase):
     def submit_partial(self,pair,qty,leverage):
         self.assertEqual(self.row()['data']['short_tp']['phase'],'closing')
         self.assertEqual(self.row()['data']['tp1_orders'][-1]['status'],'submitting')
+        self.assertEqual(D(self.row()['data']['short_tp']['tp1_quantity']),qty)
+        self.assertGreaterEqual(qty*self.ex.price.return_value,D(self.info['min_notional']))
+        self.assertGreater(-D(self.p['active_pos']),qty)
         oid='partial'+str(self.ex.partial_short_exit.call_count)
         self.orders[oid]={**self.order(oid,str(qty),'0','open',str(qty)),'side':'buy','order_type':'market_order'}
         return oid
@@ -66,7 +69,7 @@ class SplitTests(unittest.TestCase):
         self.finish_partial();self.poll()
         self.assertEqual(self.row()['data']['short_tp']['phase'],'runner')
     def fill_average(self):
-        self.price('.70');self.poll()
+        self.price('.715');self.poll()
         a=self.row()['data']['average_order'];qty=D(a['quantity']);price=D(a['limit_price'])
         self.orders[a['order_id']]=self.order(a['order_id'],str(qty),str(price))
         previous=-D(self.p['active_pos']);avg=(previous*D(self.p['avg_price'])+qty*price)/(previous+qty)
@@ -88,13 +91,16 @@ class SplitTests(unittest.TestCase):
         self.poll();self.poll();self.ex.partial_short_exit.assert_called_once()
         self.assertEqual(len([c for c in self.emit.call_args_list if c.args[0]=='PARTIAL_TP_FILLED']),1)
     def test_rearmed_average_uses_three_dollars_not_initial_quantity(self):
-        self.tp1();self.price('.70');self.poll()
+        self.tp1();self.price('.715');self.poll()
         a=self.row()['data']['average_order']
         self.assertEqual(a['quantity'],'12.2');self.assertLessEqual(D(a['estimated_margin']),D(3))
         self.assertEqual(self.ex.create.call_args.args[3:5],(3,'crossed'))
         self.assertEqual(self.ex.create.call_args.kwargs['limit_price'],D('.7344'))
     def test_rearmed_trigger_uses_remaining_average(self):
-        self.tp1();self.price(str(D('.5264')*D('1.30')));self.poll();self.ex.create.assert_not_called()
+        self.tp1()
+        for growth in ('1.30','1.34','1.3499','1.35'):
+            self.price(str(D('.5264')*D(growth)));self.poll();self.ex.create.assert_not_called()
+        self.price(str(D('.5264')*D('1.3501')));self.poll();self.ex.create.assert_called_once()
     def test_average_fill_starts_another_split_cycle_at_new_weighted_average(self):
         self.tp1();self.fill_average();s=self.row()['data']['short_tp']
         self.assertEqual(s['phase'],'waiting');self.assertEqual(s['cycle'],2)
@@ -152,7 +158,7 @@ class SplitTests(unittest.TestCase):
         self.fills.append(self.fill('unknown-buy','buy','2','.51',self.now+len(self.fills)));self.poll()
         self.assertEqual(self.row()['status'],'CONFLICT');self.ex.create.assert_not_called()
     def test_pending_average_cancelled_before_partial_exit(self):
-        self.poll();self.price('.70');self.poll()
+        self.poll();self.price('.715');self.poll()
         a=self.row()['data']['average_order'];self.orders[a['order_id']]=self.order(a['order_id'],a['quantity'],'0','open',a['quantity'])
         self.price('.48');self.poll();self.ex.partial_short_exit.assert_not_called()
         self.assertEqual(self.orders[a['order_id']]['status'],'cancelled')
@@ -165,7 +171,65 @@ class SplitTests(unittest.TestCase):
     def test_size_rounding_keeps_exact_remainder_and_checks_minimum(self):
         plan=split_plan(self.info,D('34'),D('.6032'))
         self.assertEqual((plan['tp1_quantity'],plan['tp1'],plan['tp2']),('25.5','0.5609','0.4825'))
-        with self.assertRaisesRegex(ValueError,'TOO_SMALL'):split_plan(INFO,D(8),D(1))
+        self.assertEqual(split_plan(INFO,D(8),D(1))['tp1_quantity'],'7')
+        with self.assertRaisesRegex(ValueError,'TOO_SMALL'):split_plan(INFO,D(7),D(1))
+    def small_position(self,qty='.5',fill='16.767'):
+        self.info={**self.info,'price_increment':'.001'}
+        self.market.metadata.return_value=self.info
+        tp=str((D(fill)*D('.93')).quantize(D('.001'),rounding='ROUND_DOWN'))
+        self.db.update(self.ident,'OPEN',quantity=qty,filled_quantity=qty,initial_quantity=qty,
+                       fill=fill,initial_fill=fill,info=self.info,tp=tp)
+        self.first.update(total_quantity=qty,avg_price=fill)
+        self.p.update(active_pos=str(-D(qty)),avg_price=fill)
+        self.fills=[self.fill('first','sell',qty,fill,self.now-7000)]
+        self.native(tp);self.price(str(D(fill)*D('1.01')))
+    def test_small_short_migrates_then_minimum_exit_rearms_with_runner_intact(self):
+        self.small_position();self.poll()
+        s=self.row()['data']['short_tp']
+        self.assertEqual((s['tp1_quantity'],s['tp1'],s['tp2']),('0.4','15.593','13.413'))
+        self.assertEqual(self.p['take_profit_trigger'],'13.413')
+        self.price('15.5');self.poll();self.poll()
+        self.ex.partial_short_exit.assert_called_once_with(PAIR,D('.4'),3)
+        self.finish_partial();self.reset_engine();self.poll();self.poll()
+        self.assertEqual(self.row()['data']['short_tp']['phase'],'runner')
+        self.assertEqual(D(self.row()['data']['short_tp']['runner_quantity']),D('.1'))
+        self.assertFalse(self.row()['data']['averaging_used'])
+        self.assertEqual(self.p['take_profit_trigger'],'13.413')
+        self.ex.partial_short_exit.assert_called_once()
+    def test_execution_price_recalculates_minimum_before_persisting_exit(self):
+        self.small_position(qty='.7',fill='13');self.poll()
+        self.assertEqual(self.row()['data']['short_tp']['tp1_quantity'],'0.5')
+        self.price('11.5');self.poll();self.poll()
+        self.ex.partial_short_exit.assert_called_once_with(PAIR,D('.6'),3)
+        self.assertEqual(self.row()['data']['short_tp']['tp1_quantity'],'0.6')
+        self.finish_partial();self.poll()
+        self.assertEqual(D(self.row()['data']['short_tp']['runner_quantity']),D('.1'))
+    def test_price_gap_without_room_for_runner_does_not_send_invalid_order(self):
+        self.small_position(qty='.6',fill='13');self.poll();self.price('11.5');self.poll();self.poll()
+        self.ex.partial_short_exit.assert_not_called()
+        self.ex.cancel.assert_not_called();self.ex.take_profit.assert_called_once()
+        self.assertEqual(D(self.p['take_profit_trigger']),D('10.4'))
+        self.assertTrue(any(c.args[0]=='PARTIAL_TP_WAITING' for c in self.emit.call_args_list))
+    def test_crossing_final_target_during_cancel_uses_full_exit_once(self):
+        self.poll();self.price('.48');self.poll()
+        self.ex.price.side_effect=[D('.48'),D('.40'),D('.40')]
+        self.poll();self.poll()
+        self.ex.partial_short_exit.assert_not_called();self.ex.exit.assert_called_once()
+        self.assertEqual(self.row()['status'],'CLOSING')
+    def test_smallest_unsplittable_legacy_short_keeps_full_seven_percent(self):
+        self.small_position(qty='.4');self.poll()
+        self.assertNotIn('short_tp',self.row()['data'])
+        self.assertEqual(self.p['take_profit_trigger'],'15.593');self.ex.partial_short_exit.assert_not_called()
+    def test_minimum_quantity_and_trade_size_round_up_and_leave_valid_remainder(self):
+        info={**self.info,'min_trade_size':'.25','min_notional':'.01'}
+        self.assertEqual(partial_quantity(info,D('.8'),D(1)),D('.3'))
+        with self.assertRaisesRegex(ValueError,'TOO_SMALL'):partial_quantity(info,D('.5'),D(1))
+    def test_split_rejects_invalid_lots_and_exchange_maximum(self):
+        with self.assertRaisesRegex(ValueError,'INVALID'):split_plan(self.info,D('.55'),D(20))
+        with self.assertRaisesRegex(ValueError,'MAXIMUM'):
+            split_plan({**self.info,'max_market_order_quantity':'1'},D(10),D(20))
+        with self.assertRaisesRegex(ValueError,'MAXIMUM'):
+            split_plan({**self.info,'max_quantity':'.3'},D('.5'),D('16.767'))
     def test_replay_handles_reductions_before_additions_and_rejects_reopening(self):
         fills=[self.fill('first','sell','10','1',1),self.fill('partial','buy','7.5','.93',2),self.fill('add','sell','10','2',3)]
         self.assertEqual(replay_short(fills,{'first','add'},{'partial'}),(D('12.5'),D('1.8')))

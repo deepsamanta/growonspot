@@ -31,8 +31,8 @@ class AveragingTests(unittest.TestCase):
         self.ex.find_order.side_effect=lambda pair,side,oid:self.orders.get(oid)
         self.ex.positions.return_value=[self.p];self.ex.all_positions.return_value=[self.p]
         self.ex.wallet_balance.return_value=D(50);self.ex.orders.return_value=[];self.ex.recent_entries.return_value=[];self.ex.transactions.return_value=[]
-        self.ex.create.return_value='addition';self.ex.price.return_value=D('.70')
-        self.market.quotes.return_value={PAIR:Quote(PAIR,D('.70'),D(0),self.now,D('.6'),D('.70'))}
+        self.ex.create.return_value='addition';self.ex.price.return_value=D('.715')
+        self.market.quotes.return_value={PAIR:Quote(PAIR,D('.715'),D(0),self.now,D('.6'),D('.715'))}
         self.market.metadata.return_value=self.info;self.market.eligible_metadata.return_value=True
         self.market.candles.return_value=[]
         self.ex.take_profit.side_effect=lambda pair,p,tp:p.update(take_profit_trigger=str(tp))
@@ -65,9 +65,11 @@ class AveragingTests(unittest.TestCase):
         self.ex.create.assert_called_once_with(PAIR,'SELL',D(17),3,'crossed',D('.6829'),limit_price=D('.7344'))
         self.assertGreater(D(a['estimated_margin']),D(3));self.assertAlmostEqual(a['expires_at']-a['submitted_at'],14400,delta=.1)
         self.assertEqual(len(self.db.occupied()),1);self.ex.prepare.assert_not_called()
-    def test_strict_thirty_percent_from_original_actual_fill(self):
-        self.ex.price.return_value=D('.5264')*D('1.30');self.poll();self.ex.create.assert_not_called()
+    def test_strict_thirty_five_percent_from_original_actual_fill(self):
+        for growth in ('1.30','1.34','1.3499','1.35'):
+            self.ex.price.return_value=D('.5264')*D(growth);self.poll();self.ex.create.assert_not_called()
         self.assertFalse(self.e.averager.history.daily.called)
+        self.ex.price.return_value=D('.5264')*D('1.3501');self.poll();self.ex.create.assert_called_once()
     def test_nearest_resistance_and_ten_percent_band(self):
         self.e.averager.history.daily.return_value=bars([.6,.65,.80,.65,.6]);self.poll()
         self.ex.create.assert_not_called()

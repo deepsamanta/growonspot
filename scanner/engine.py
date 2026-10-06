@@ -250,7 +250,7 @@ class Engine:
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),
                       fill=str(fill),tp=str(tp),leverage=d['leverage'],mode=d['mode'],margin=str(filled*fill/d['leverage']),
-                      profit_plan='75% at 7%, remainder at 20%' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
+                      profit_plan='75% (or minimum valid quantity) at 7%, remainder at 20%' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
         if decimal(p.get('stop_loss_trigger') or 0)!=0:
             self.conflict(self.db.get(ident),'UNEXPECTED_EXISTING_STOP_LOSS');return
         if d['side']=='SELL' and self.c.short_split_tp and self.short_tp.manage(self.db.get(ident),p):
