@@ -6,7 +6,8 @@ from .market import decimal
 from .capacity import BalanceCapacity
 from .strategy import long_confirmation
 from .averaging import ShortAverager, RECOVERABLE
-from .short_tp import ShortTakeProfit, split_plan
+from .short_tp import split_plan
+from .resting_tp import RestingShortTakeProfit
 
 D=Decimal
 
@@ -17,7 +18,7 @@ class Engine:
         self.ledger_at=0
         self.averager=ShortAverager(self)
         self.balanced_capacity=BalanceCapacity(exchange,state)
-        self.short_tp=ShortTakeProfit(self)
+        self.short_tp=RestingShortTakeProfit(self)
 
     def capacity(self):
         return self.balanced_capacity.get()
@@ -164,6 +165,7 @@ class Engine:
         status=trade['status']
         if status in ('CLOSED','REJECTED'):return
         if status=='CONFLICT' and not (d.get('side')=='SELL' and d.get('position_id') and d.get('reason') in RECOVERABLE):
+            if d['side']=='SELL' and self.c.short_split_tp:self.short_tp.cancel_resting(trade,'POSITION_CONFLICT')
             if d.get('average_order'):self.averager.cancel_own(trade,'POSITION_CONFLICT')
             return
         if status=='RESERVED':
@@ -219,6 +221,7 @@ class Engine:
             trade=self.db.get(ident);d=trade['data']
         if not positions:
             if d.get('position_id'):
+                if d['side']=='SELL' and self.c.short_split_tp and not self.short_tp.cancel_resting(trade,'POSITION_CLOSED'):return
                 self.db.record_flat(ident,time.time())
                 self.reconcile_pnl(self.db.get(ident))
             elif time.time()-d['fill_seen_at']>60:
@@ -250,7 +253,7 @@ class Engine:
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),
                       fill=str(fill),tp=str(tp),leverage=d['leverage'],mode=d['mode'],margin=str(filled*fill/d['leverage']),
-                      profit_plan='75% (or minimum valid quantity) at 7%, remainder at 20%' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
+                      profit_plan='Resting 7% limit: 75% (or minimum valid quantity); native 20% TP after fill' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
         if decimal(p.get('stop_loss_trigger') or 0)!=0:
             self.conflict(self.db.get(ident),'UNEXPECTED_EXISTING_STOP_LOSS');return
         if d['side']=='SELL' and self.c.short_split_tp and self.short_tp.manage(self.db.get(ident),p):
@@ -277,6 +280,8 @@ class Engine:
 
     def conflict(self,trade,reason):
         self.db.update(trade['id'],'CONFLICT',reason=reason)
+        if trade['data'].get('side')=='SELL' and self.c.short_split_tp:
+            self.short_tp.cancel_resting(trade,'POSITION_CONFLICT')
         self.emit('OWNERSHIP_CONFLICT',pair=trade['pair'],trade_id=trade['id'],reason=reason)
 
     def reconcile_pnl(self,trade):

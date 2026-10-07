@@ -7,7 +7,7 @@ from unittest.mock import Mock,patch
 from scanner.capacity import BalanceCapacity
 from scanner.exchange import Exchange,ExchangeError
 from scanner.state import ScannerState
-from scanner.short_tp import split_plan,partial_quantity,replay_short
+from scanner.short_tp import ShortTakeProfit,split_plan,partial_quantity,replay_short
 import test_scanner_averaging as fixtures
 from test_scanner_strategy import INFO,PAIR,bars
 from scanner.market import Quote
@@ -15,8 +15,12 @@ from scanner.market import Quote
 
 class SplitTests(unittest.TestCase):
     row=fixtures.AveragingTests.row;poll=fixtures.AveragingTests.poll;order=fixtures.AveragingTests.order
-    tx=fixtures.AveragingTests.tx;reset_engine=fixtures.AveragingTests.reset_engine
+    tx=fixtures.AveragingTests.tx
     tearDown=fixtures.AveragingTests.tearDown
+    def reset_engine(self):
+        # Preserve coverage for pre-upgrade market exits still being reconciled.
+        fixtures.AveragingTests.reset_engine(self)
+        self.e.short_tp=ShortTakeProfit(self.e)
     def setUp(self):
         fixtures.AveragingTests.setUp(self)
         self.c=replace(self.c,short_split_tp=True)

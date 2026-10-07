@@ -36,6 +36,13 @@ class CapacityTests(unittest.TestCase):
     def test_external_pending_order_consumes_capacity(self):
         c=account_capacity([position('B-A_USDT',0,inactive_pos_sell=1),position('B-B_USDT',0,inactive_pos_buy=1)],[])
         self.assertEqual((len(c.pairs),len(c.shorts),len(c.longs)),(2,1,1))
+    def test_closing_orders_do_not_consume_opposite_side_slots(self):
+        c=account_capacity([position('B-S_USDT',-34,inactive_pos_buy=25.5),
+                            position('B-L_USDT',1304,inactive_pos_sell=652)],[])
+        self.assertEqual((len(c.pairs),len(c.shorts),len(c.longs)),(2,1,1))
+    def test_excess_pending_close_can_reverse_and_counts_both_sides(self):
+        c=account_capacity([position('B-S_USDT',-34,inactive_pos_buy=35)],[])
+        self.assertEqual((len(c.pairs),len(c.shorts),len(c.longs)),(1,1,1))
     def test_database_side_reservations_are_atomic(self):
         with tempfile.TemporaryDirectory() as f:
             a=ScannerState(f+'/db');b=ScannerState(f+'/db')

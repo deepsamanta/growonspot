@@ -244,6 +244,17 @@ class Exchange:
         if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous partial exit acknowledgement','orders/create')
         return rows[0]['id']
 
+    def partial_short_limit(self,pair,qty,leverage,price):
+        nongold(pair)
+        order={'pair':pair,'side':'buy','order_type':'limit_order','price':float(decimal(price,True)),
+               'total_quantity':float(decimal(qty,True)),'leverage':leverage,'position_margin_type':'crossed',
+               'margin_currency_short_name':'USDT','notification':'no_notification','time_in_force':'good_till_cancel'}
+        result=self.request('orders/create',{'order':order})
+        rows=result if isinstance(result,list) else result.get('order',[]) if isinstance(result,dict) else []
+        if isinstance(rows,dict):rows=[rows]
+        if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous partial limit acknowledgement','orders/create')
+        return rows[0]['id']
+
     def take_profit(self,pair,position,tp):
         nongold(pair)
         if position.get('pair')!=pair:raise ExchangeError('TP ownership mismatch')

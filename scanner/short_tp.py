@@ -56,6 +56,10 @@ class ShortTakeProfit:
     def __init__(self,engine):
         self.e=engine;self.db=engine.db;self.ex=engine.ex;self.emit=engine.emit
 
+    def cancel_resting(self,trade,reason):
+        # Legacy market exits have no standing limit to cancel.
+        return True
+
     def save(self,trade,**changes):
         row=self.db.get(trade['id']);s={**row['data'].get('short_tp',{}),**changes}
         self.db.update(row['id'],row['status'],short_tp=s)

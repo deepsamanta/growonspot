@@ -40,8 +40,9 @@ def account_capacity(positions, reservations, limits=(5,2,3)):
         buy=decimal(p.get('inactive_pos_buy') or 0)
         sell=decimal(p.get('inactive_pos_sell') or 0)
         if active or buy or sell:pairs.add(pair)
-        if active>0 or buy>0:longs.add(pair)
-        if active<0 or sell>0:shorts.add(pair)
+        # Orders covered by the opposite open position are closes, not new side slots.
+        if active>0 or buy>max(-active,0):longs.add(pair)
+        if active<0 or sell>max(active,0):shorts.add(pair)
     for row in reservations:
         pair=row['pair']
         if is_gold(pair):continue

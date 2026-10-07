@@ -19,6 +19,8 @@ TITLES={'ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitte
         'AVERAGE_UNCERTAIN':'Averaging order needs review; no resubmission',
         'AVERAGE_REJECTED':'Averaging order rejected; no resubmission',
         'PARTIAL_TP_SUBMITTED':'First short profit exit submitted',
+        'PARTIAL_TP_LIMIT_SUBMITTED':'7% short profit limit is resting on the exchange',
+        'PARTIAL_TP_CANCEL_REQUESTED':'Previous short profit limit cancellation requested',
         'PARTIAL_TP_FILLED':'First short profit taken; one $3 averaging entry rearmed',
         'PARTIAL_TP_UNCERTAIN':'Partial profit exit needs review; no duplicate submission',
         'PARTIAL_TP_WAITING':'Short partial profit exit waiting',

@@ -85,7 +85,8 @@ def run(config):
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
             'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
             'short_average_trigger':str(TRIGGER),'short_average_once':'per_cycle_including_manual',
-            'short_tp_split':'75% (or minimum valid quantity) at 7%; remainder at 20%','balance_slot_step_usdt':'50',
+            'short_tp_split':'Resting limit: 75% (or minimum valid quantity) at 7%; native 20% after fill',
+            'short_tp_order_type':'limit_order','balance_slot_step_usdt':'50',
             'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -98,7 +99,7 @@ def run(config):
     server=HTTPServer(('0.0.0.0',config.health_port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
-    alerts.emit('SCANNER_STARTED',enabled=config.enabled,base_max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / TP 75% (or minimum valid quantity) at 7%, rest at 20%',
+    alerts.emit('SCANNER_STARTED',enabled=config.enabled,base_max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / resting 7% profit limit, native 20% TP after first fill',
                 short_average_trigger=str(TRIGGER),
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / TP 6%',stop_loss='none',
                 position_limits='Base: 5 total / 3 short / 2 long; +1 slot each $50 growth, alternating short/long',long_confirmation='4h consolidation or bullish reversal',
