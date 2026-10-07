@@ -255,6 +255,18 @@ class Exchange:
         if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous partial limit acknowledgement','orders/create')
         return rows[0]['id']
 
+    def average_long(self,pair,qty):
+        nongold(pair)
+        # Keep the existing TP until the combined fill is verified and repriced.
+        order={'pair':pair,'side':'buy','order_type':'market_order','price':None,
+               'total_quantity':float(decimal(qty,True)),'leverage':1,'position_margin_type':'isolated',
+               'margin_currency_short_name':'USDT','notification':'no_notification'}
+        result=self.request('orders/create',{'order':order})
+        rows=result if isinstance(result,list) else result.get('order',[]) if isinstance(result,dict) else []
+        if isinstance(rows,dict):rows=[rows]
+        if len(rows)!=1 or not rows[0].get('id'):raise ExchangeError('Ambiguous long averaging acknowledgement','orders/create')
+        return rows[0]['id']
+
     def take_profit(self,pair,position,tp):
         nongold(pair)
         if position.get('pair')!=pair:raise ExchangeError('TP ownership mismatch')

@@ -8,6 +8,7 @@ from .strategy import long_confirmation
 from .averaging import ShortAverager, RECOVERABLE
 from .short_tp import split_plan
 from .resting_tp import RestingShortTakeProfit
+from .long_averaging import LongAverager,RECOVERABLE as LONG_RECOVERABLE
 
 D=Decimal
 
@@ -17,6 +18,7 @@ class Engine:
         self.c,self.db,self.ex,self.market,self.emit=config,state,exchange,market,emit
         self.ledger_at=0
         self.averager=ShortAverager(self)
+        self.long_averager=LongAverager(self)
         self.balanced_capacity=BalanceCapacity(exchange,state)
         self.short_tp=RestingShortTakeProfit(self)
 
@@ -164,9 +166,11 @@ class Engine:
         ident,pair,d=trade['id'],trade['pair'],trade['data']
         status=trade['status']
         if status in ('CLOSED','REJECTED'):return
-        if status=='CONFLICT' and not (d.get('side')=='SELL' and d.get('position_id') and d.get('reason') in RECOVERABLE):
+        recoverable=RECOVERABLE if d.get('side')=='SELL' else LONG_RECOVERABLE
+        if status=='CONFLICT' and not (d.get('position_id') and d.get('reason') in recoverable):
             if d['side']=='SELL' and self.c.short_split_tp:self.short_tp.cancel_resting(trade,'POSITION_CONFLICT')
-            if d.get('average_order'):self.averager.cancel_own(trade,'POSITION_CONFLICT')
+            if d.get('average_order'):
+                (self.averager if d['side']=='SELL' else self.long_averager).cancel_own(trade,'POSITION_CONFLICT')
             return
         if status=='RESERVED':
             # Create cannot have been called before the SUBMITTING commit.
@@ -214,14 +218,16 @@ class Engine:
         positions=[p for p in self.ex.positions(pair) if decimal(p['active_pos'])!=0]
         initial_qty=filled
         fill=None
-        if d['side']=='SELL' and d.get('position_id'):
-            reconciled=self.averager.sync(trade,positions,order,initial_qty)
+        if d.get('position_id'):
+            averager=self.averager if d['side']=='SELL' else self.long_averager
+            reconciled=averager.sync(trade,positions,order,initial_qty)
             if reconciled is None:return
             filled,fill=reconciled
             trade=self.db.get(ident);d=trade['data']
         if not positions:
             if d.get('position_id'):
                 if d['side']=='SELL' and self.c.short_split_tp and not self.short_tp.cancel_resting(trade,'POSITION_CLOSED'):return
+                if d['side']=='BUY' and not self.long_averager.cancel_own(trade,'POSITION_CLOSED'):return
                 self.db.record_flat(ident,time.time())
                 self.reconcile_pnl(self.db.get(ident))
             elif time.time()-d['fill_seen_at']>60:
@@ -264,6 +270,7 @@ class Engine:
             hit=exit_price>=tp if d['side']=='BUY' else exit_price<=tp
             if hit:
                 if d['side']=='SELL' and not self.averager.cancel_own(trade,'TP_EXIT'):return
+                if d['side']=='BUY' and not self.long_averager.cancel_own(trade,'TP_EXIT'):return
                 self.db.update(ident,'CLOSING',exit_requested_at=time.time())
                 self.ex.exit(pair,p)
                 self.emit('TP_EXIT_REQUESTED',pair=pair,trade_id=ident);return
@@ -277,6 +284,7 @@ class Engine:
                 self.emit('TP_PENDING',pair=pair,trade_id=ident);return
         self.db.update(ident,'OPEN')
         if d['side']=='SELL':self.averager.maybe_place(self.db.get(ident))
+        else:self.long_averager.maybe_place(self.db.get(ident))
 
     def conflict(self,trade,reason):
         self.db.update(trade['id'],'CONFLICT',reason=reason)
