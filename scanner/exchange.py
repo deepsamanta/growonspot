@@ -151,15 +151,15 @@ class Exchange:
                     return order
         return None
 
-    def recent_entries(self,pair,side,since):
-        """Aggregate actual fills using the pair/date-filtered trades endpoint.
+    def recent_entries(self,pair,side,since,known_order_ids=()):
+        """Aggregate actual fills from order-specific trade-history reads.
 
         Orders are sorted by update time, not creation time, and account-wide
         history can be enormous. No order-history sorting assumption is needed.
         The caller separately verifies each addition against the position ledger.
         """
         grouped={}
-        for fill in self.trade_fills(pair,since):
+        for fill in self.trade_fills(pair,since,known_order_ids):
             if fill['side']!=side.lower():continue
             oid=fill['order_id'];qty=decimal(fill['quantity'],True);price=decimal(fill['price'],True)
             item=grouped.setdefault(oid,{'qty':D(0),'cost':D(0),'stamp':float(fill['timestamp'])})
@@ -168,12 +168,39 @@ class Exchange:
                  'total_quantity':str(v['qty']),'remaining_quantity':'0','cancelled_quantity':'0',
                  'avg_price':str(v['cost']/v['qty']),'created_at':v['stamp']} for oid,v in grouped.items()]
 
-    def trade_fills(self,pair,since):
+    def trade_fills(self,pair,since,known_order_ids=()):
+        """Discover manual activity in the ledger, then read fills by order ID.
+
+        Pair-wide trade queries can time out even for two fills. Order-scoped
+        queries avoid that slow path. Known IDs cover ledger publication lag;
+        ledger discovery still includes manual additions and unknown exits.
+        Never turn an incomplete history read into an empty successful result.
+        """
         nongold(pair)
         start=datetime.fromtimestamp(since,timezone.utc).date().isoformat()
         end=(datetime.now(timezone.utc)+timedelta(days=1)).date().isoformat()
-        return [f for page in self.pages('trades',{'pair':pair,'from_date':start,'to_date':end}) for f in page
-                if f.get('pair')==pair and float(f['timestamp'])/1000>=since]
+        discovered=set()
+        for row in self.transactions(since):
+            if (row.get('pair')!=pair or row.get('stage')=='funding'
+                    or 'Order' not in row.get('parent_type','')
+                    or float(row['created_at'])/1000<since):continue
+            oid=row.get('parent_id')
+            if not isinstance(oid,str) or not oid:
+                raise ExchangeError('Missing order ID in position ledger','positions/transactions')
+            discovered.add(oid)
+        ids=discovered|{oid for oid in known_order_ids if oid}
+        fills=[]
+        for oid in sorted(ids):
+            found=False
+            for page in self.pages('trades',{'pair':pair,'order_id':oid,'from_date':start,'to_date':end}):
+                for fill in page:
+                    if fill.get('pair')!=pair or fill.get('order_id')!=oid:
+                        raise ExchangeError('Trade-history order ownership mismatch','trades')
+                    found=True
+                    if float(fill['timestamp'])/1000>=since:fills.append(fill)
+            if oid in discovered and not found:
+                raise ExchangeError('Ledger order fills not yet available','trades')
+        return fills
 
     def transactions(self,since):
         result=[]

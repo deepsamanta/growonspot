@@ -60,7 +60,8 @@ class LongAverager:
         own=d.get('average_order',{});own_id=own.get('order_id');bot_ids={d['order_id'],own_id}
         pending=[o for o in self.ex.orders(pair,'BUY') if o.get('id') not in bot_ids
                  and o.get('stage')=='default' and o.get('side')=='buy']
-        external={o['id']:o for o in self.ex.recent_entries(pair,'BUY',d['submitted_at']-2)
+        history_ids=bot_ids|set(d.get('manual_entries',{}))|{o['id'] for o in pending}
+        external={o['id']:o for o in self.ex.recent_entries(pair,'BUY',d['submitted_at']-2,history_ids)
                   if o['id'] not in bot_ids and filled_quantity(o)>0}
         if pending or external:self.manual(trade,[o['id'] for o in pending]+list(external),'MANUAL_ENTRY_ORDER')
         known_qty=decimal(d.get('filled_quantity') or initial_qty)

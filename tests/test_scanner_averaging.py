@@ -209,9 +209,14 @@ class AverageAdapterTests(unittest.TestCase):
             validate_quantity(INFO,D('17.5'),D('.7344'),D(17),3,D('.7'))
     def test_recent_entries_filters_pair_side_time_and_aggregates_partial_fills(self):
         ex=Exchange(Mock(),Mock());common={'pair':PAIR,'side':'sell','timestamp':2000,'quantity':'2','price':'1'}
-        ex.pages=Mock(return_value=iter([[{**common,'order_id':'yes'},{**common,'order_id':'old','timestamp':0},
-            {**common,'order_id':'wrong','pair':'B-XAU_USDT'},{**common,'order_id':'buy','side':'buy'}],
-            [{**common,'order_id':'yes','timestamp':3000,'quantity':'3','price':'2'}]]))
+        ex.transactions=Mock(return_value=[{'pair':PAIR,'stage':'default','parent_type':'Order',
+            'parent_id':'yes','created_at':2000},{'pair':PAIR,'stage':'default','parent_type':'Order',
+            'parent_id':'buy','created_at':2000}])
+        ex.pages=Mock(side_effect=lambda path,body:iter([[{**common,'order_id':body['order_id'],
+            'side':'buy' if body['order_id']=='buy' else 'sell'},
+            {**common,'order_id':body['order_id'],'timestamp':0}],
+            [{**common,'order_id':body['order_id'],'timestamp':3000,'quantity':'3','price':'2',
+              'side':'buy' if body['order_id']=='buy' else 'sell'}]]))
         rows=ex.recent_entries(PAIR,'SELL',1)
         self.assertEqual([o['id'] for o in rows],['yes'])
         self.assertEqual((rows[0]['total_quantity'],rows[0]['avg_price']),('5','1.6'))

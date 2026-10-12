@@ -88,7 +88,9 @@ class ShortAverager:
         bot_ids={d['order_id'],own_id,*[a.get('order_id') for a in d.get('average_history',[])]}
         pending=[o for o in self.ex.orders(pair,'SELL') if o.get('id') not in bot_ids
                  and o.get('stage')=='default' and o.get('side')=='sell']
-        recent=self.ex.recent_entries(pair,'SELL',d['submitted_at']-2)
+        history_ids=bot_ids|set(d.get('manual_entries',{}))|{o.get('order_id') for o in d.get('tp1_orders',[])}
+        history_ids.update(o['id'] for o in pending)
+        recent=self.ex.recent_entries(pair,'SELL',d['submitted_at']-2,history_ids)
         external={o['id']:o for o in recent if o['id'] not in bot_ids and filled_quantity(o)>0}
         baseline=d.get('manual_cycle_baseline',{})
         additions=[oid for oid,o in external.items() if filled_quantity(o)>decimal(baseline.get(oid) or 0)]
@@ -147,7 +149,7 @@ class ShortAverager:
         if positions and d.get('tp1_orders'):
             from .short_tp import replay_short
             try:
-                qty,expected_fill=replay_short(self.ex.trade_fills(pair,d['submitted_at']-2),
+                qty,expected_fill=replay_short(self.ex.trade_fills(pair,d['submitted_at']-2,history_ids|set(known)),
                     bot_ids|set(known),{o.get('order_id') for o in d['tp1_orders']})
                 if qty<=0:raise ValueError('SHORT_ALREADY_CLOSED')
             except ValueError as error:
