@@ -133,23 +133,33 @@ class MessageProcessor:
             await self.retain_later_marker(candidate, marker)
 
 
-async def run_cycle(client, channel, offset, processor):
+async def run_cycle(client, channel, offset, processor, reader=None):
     """Reconciliation errors must never prevent Telegram offset/close processing."""
     healthy = True
     try:
-        async for message in client.iter_messages(channel, min_id=offset, reverse=True, limit=100):
-            try:
-                await processor.process(message)
-            except Exception as error:
-                healthy = False
-                await processor.event('MESSAGE_PROCESSING_ERROR', message_id=message.id, **error_details(error))
-            # Entry and exit intents are durable before mutations. Do not replay an order
-            # because notification, exchange reconciliation, or OCR failed afterwards.
-            await processor.worker(processor.db.advance, processor.c.channel, message.id)
-            offset = message.id
+        ready = await reader.ready() if reader else True
+        if not ready:
+            healthy = False
+        if ready:
+            messages = reader.messages(channel, offset) if reader else client.iter_messages(channel, min_id=offset, reverse=True, limit=100)
+            async for message in messages:
+                try:
+                    await processor.process(message)
+                except Exception as error:
+                    healthy = False
+                    await processor.event('MESSAGE_PROCESSING_ERROR', message_id=message.id, **error_details(error))
+                # Entry and exit intents are durable before mutations. Do not replay an order
+                # because notification, exchange reconciliation, or OCR failed afterwards.
+                await processor.worker(processor.db.advance, processor.c.channel, message.id)
+                offset = message.id
+            if reader:
+                await reader.succeeded()
     except Exception as error:
         healthy = False
-        await processor.event('TELEGRAM_POLL_ERROR', **error_details(error))
+        if reader:
+            await reader.failed(error)
+        else:
+            await processor.event('TELEGRAM_POLL_ERROR', **error_details(error))
     try:
         await processor.worker(processor.trader.reconcile)
     except Exception as error:

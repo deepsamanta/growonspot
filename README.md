@@ -84,6 +84,8 @@ A startup notification is sent when initialization succeeds. No test trade is ne
 
 The localhost-only health port reports Telegram connectivity, recent exchange connectivity, DB loop health, mode, active trade state and message offset. Docker health status does not automatically restart an unhealthy process; monitor `review_required` and `degraded` states. Telegram messages are processed independently of exchange reconciliation errors. Failed message processing is logged and its offset advances; durable entry/exit intents prevent duplicate mutations. Exchange read calls retry with backoff; mutating requests are never blindly retried.
 
+If Telegram exhausts its internal reconnect attempts, the reader explicitly reconnects the existing user session and resumes after the saved message offset. Failed attempts back off for 5, 10, 20, 40 and then 60 seconds; Telegram flood-wait instructions can extend that delay. Connection and individual history reads have deadlines, while OCR and exchange operations are never cancelled by those deadlines. Exchange reconciliation continues during Telegram retry delays. Failed connections are cleaned up before another connection starts, and revoked sessions require login rather than message processing. A `TELEGRAM_RECONNECTED` alert is emitted only after a history read succeeds. Health includes `telegram_last_read` and `telegram_retry_in_seconds`. Recovery retains the existing signal-age checks and does not reset the offset, deduplication records or trading rules.
+
 ## Offline checks
 
 `tests/fixtures/short_signal.jpg` and `long_signal.jpg` are the exact supplied reference images. Parser, isolation, sizing and restart checks use no exchange credentials and place no orders:

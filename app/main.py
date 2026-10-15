@@ -15,6 +15,7 @@ from .exchange import CoinDCX
 from .messages import MessageProcessor, run_cycle, error_details
 from functools import partial
 from .trading import Trader
+from .telegram_reader import TelegramReader
 
 async def main(alerts):
     c = Config()
@@ -71,6 +72,9 @@ async def main(alerts):
     db = await worker(Database, c.database, alerts)
     trader = Trader(c, db, ex)
     processor = MessageProcessor(c, db, trader, worker)
+    # Runtime flood waits are scheduled by the reader so exchange monitoring continues.
+    client.flood_sleep_threshold = 0
+    reader = TelegramReader(client, processor.event)
     await worker(db.event, 'TELEGRAM_CONNECTED')
     alerts.emit('BOT_STARTED', margin=str(c.margin), leverage=c.leverage, dry=c.dry)
     if not alerts.enabled:
@@ -83,13 +87,15 @@ async def main(alerts):
     try:
         while True:
             try:
-                offset, cycle_ok = await run_cycle(client, channel, offset, processor)
+                offset, cycle_ok = await run_cycle(client, channel, offset, processor, reader)
                 active = await worker(db.active)
                 status = active['status'] if active else None
                 health.update(status='ok' if status not in ('UNCERTAIN', 'ISOLATION_CONFLICT', 'CLOSING') else 'review_required',
                               telegram=client.is_connected(), coindcx=time.time()-ex.last_ok < 90,
                               database=True, active_trade=bool(active), active_status=status,
                               last_telegram_message_processed=offset, updated_at=time.time())
+                health.update(telegram_last_read=reader.last_success,
+                              telegram_retry_in_seconds=round(reader.retry_in, 1))
                 if not cycle_ok or not health['telegram'] or not health['coindcx']:
                     health['status'] = 'degraded'
             except Exception as error:

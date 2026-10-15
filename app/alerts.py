@@ -19,7 +19,8 @@ EVENTS = {
     'SIGNAL_DUPLICATE_TICKET': 'Update ignored: this trade ticket was already traded',
     'CLOSE_KEYWORD_DETECTED': 'Close instruction received from Telegram',
     'MESSAGE_PROCESSING_ERROR': 'Message processing failed; review logs',
-    'TELEGRAM_POLL_ERROR': 'Telegram reading failed; retrying',
+    'TELEGRAM_POLL_ERROR': 'Telegram reading failed; recovery scheduled',
+    'TELEGRAM_RECONNECTED': 'Telegram reading restored; resuming from saved message offset',
     'RECONCILIATION_ERROR': 'Exchange reconciliation failed; Telegram processing continues',
     'BOT_STARTED': 'Monitoring started',
     'BOT_FATAL': 'Bot stopped with an error; review VPS logs',
@@ -42,7 +43,7 @@ EVENTS = {
     'WOULD_OPEN': 'DRY RUN: simulated entry only',
 }
 FIELDS = ('trade_id', 'message_id', 'order_id', 'side', 'quantity', 'actual_fill_price',
-          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type', 'endpoint', 'http_status', 'ticket_id', 'total_quantity')
+          'sl', 'tp', 'margin', 'leverage', 'dry', 'reason', 'error_type', 'endpoint', 'http_status', 'ticket_id', 'total_quantity', 'retry_in_seconds')
 
 class TelegramAlerts:
     def __init__(self, token, chat_id, start_worker=True):
