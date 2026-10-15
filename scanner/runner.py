@@ -6,7 +6,6 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler,HTTPServer
 from pathlib import Path
-from .config import ScannerConfig
 from .market import MarketData,MarketDataError,DAY
 from .state import ScannerState
 from .strategy import History,evaluate
@@ -92,6 +91,7 @@ def run(config):
             'short_tp_order_type':'limit_order','balance_slot_step_usdt':'50',
             'long_average_drop':str(DROP),'long_average_once':'per_position_including_manual',
             'long_average_confirmation':'completed_4h_consolidation_or_bullish_reversal',
+            'long_tp_split':'Resting minimum valid quantity at +7%; native +15% after fill',
             'short_distance':str(config.short_distance),'short_limit_seconds':config.short_limit_seconds}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -106,8 +106,8 @@ def run(config):
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
     alerts.emit('SCANNER_STARTED',enabled=config.enabled,base_max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / resting 7% profit limit, native 20% TP after first fill',
                 short_average_trigger=str(TRIGGER),
-                long='6 USDT (minimum-size cap 6.50) / 1x / isolated / TP 6%',stop_loss='none',
-                long_averaging='Once after >60% drop from first fill + completed 4h recovery; $6 (minimum-size cap $6.50), 1x isolated; TP 6% from new average',
+                long='6 USDT (minimum-size cap 6.50) / 1x / isolated / minimum valid quantity at +7%, remainder +15%',stop_loss='none',
+                long_averaging='Once after >60% drop from first fill + completed 4h recovery; $6 (minimum-size cap $6.50), 1x isolated; profit targets follow combined average; partial TP does not reset averaging',
                 position_limits='Base: 5 total / 3 short / 2 long; +1 slot each $50 growth, alternating short/long',long_confirmation='4h consolidation or bullish reversal',
                 short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)
     try:

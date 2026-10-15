@@ -5,3 +5,4 @@
 !scanner/**
 scanner/**/__pycache__/
 scanner/**/*.pyc
+scanner/**/._*

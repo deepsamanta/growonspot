@@ -8,7 +8,7 @@ from .strategy import long_confirmation
 
 DROP=D('.60')
 RECOVERABLE={'POSITION_QUANTITY_OR_ID_CHANGED','POSITION_CHANGED_DURING_TP_UPDATE',
-             'LONG_AVERAGE_POSITION_MISMATCH','LONG_MANUAL_ADDITION_UNVERIFIED'}
+             'LONG_AVERAGE_POSITION_MISMATCH','LONG_MANUAL_ADDITION_UNVERIFIED','LONG_FILL_LEDGER_MISMATCH'}
 
 
 class LongAverager:
@@ -61,6 +61,8 @@ class LongAverager:
         pending=[o for o in self.ex.orders(pair,'BUY') if o.get('id') not in bot_ids
                  and o.get('stage')=='default' and o.get('side')=='buy']
         history_ids=bot_ids|set(d.get('manual_entries',{}))|{o['id'] for o in pending}
+        exit_ids={o.get('order_id') for o in d.get('long_tp_orders',[]) if o.get('order_id')}
+        history_ids.update(exit_ids)
         external={o['id']:o for o in self.ex.recent_entries(pair,'BUY',d['submitted_at']-2,history_ids)
                   if o['id'] not in bot_ids and filled_quantity(o)>0}
         if pending or external:self.manual(trade,[o['id'] for o in pending]+list(external),'MANUAL_ENTRY_ORDER')
@@ -110,6 +112,14 @@ class LongAverager:
         qty=initial_qty+own_qty+sum((decimal(v['quantity']) for v in known.values()),D(0))
         cost=initial_qty*initial_fill+own_qty*own_fill+sum((decimal(v['quantity'])*decimal(v['fill']) for v in known.values()),D(0))
         avg=cost/qty
+        if positions and d.get('long_tp_orders'):
+            from .long_tp import replay_long
+            try:
+                qty,avg=replay_long(self.ex.trade_fills(pair,d['submitted_at']-2,history_ids|set(known)),bot_ids|set(known),exit_ids)
+                if qty<=0:raise ValueError('LONG_ALREADY_CLOSED')
+            except ValueError:
+                self.cancel_own(trade,'POSITION_CHANGED')
+                self.e.conflict(trade,'LONG_FILL_LEDGER_MISMATCH');return None
         if positions:
             p=positions[0];tolerance=max(decimal(d['info']['price_increment'],True),avg*D('.00000001'))
             if (len(positions)!=1 or p['id']!=d['position_id'] or decimal(p['active_pos'])!=qty
@@ -123,7 +133,8 @@ class LongAverager:
         if own_qty>decimal(own.get('announced_quantity') or 0):
             self.save_order(trade,announced_quantity=str(own_qty))
             self.emit('LONG_AVERAGE_FILLED',pair=pair,trade_id=ident,added_quantity=str(own_qty),
-                      combined_quantity=str(qty),average_entry=str(avg),tp_percent='6')
+                      combined_quantity=str(qty),average_entry=str(avg),tp_percent=str(self.c.long_tp*100),
+                      profit_plan='Minimum valid quantity at +7%; remainder +15%' if self.c.long_split_tp else 'Full position TP')
         return qty,avg
 
     def maybe_place(self,trade):
@@ -151,7 +162,8 @@ class LongAverager:
         if synced[0]!=decimal(d['filled_quantity']):return
         if not self.e.capacity().within_limits:return
         # Preserve manual closing orders; do not add while a discretionary close is pending.
-        if any(o.get('stage')!='tpsl_exit' for o in self.ex.orders(pair,'SELL')):return
+        own_exits={o.get('order_id') for o in row['data'].get('long_tp_orders',[]) if o.get('order_id')}
+        if any(o.get('stage')!='tpsl_exit' and o.get('id') not in own_exits for o in self.ex.orders(pair,'SELL')):return
         latest=self.market.quotes().get(pair);price=self.ex.price(pair,'BUY');now=time.time()
         if latest is None or not -30<=now-latest.timestamp<=60:return
         high=max(price,latest.price,latest.mark_price or latest.price)
@@ -180,7 +192,7 @@ class LongAverager:
             self.save_order(trade,status='open',order_id=oid)
             self.emit('LONG_AVERAGE_SUBMITTED',pair=pair,trade_id=trade['id'],order_id=oid,quantity=str(qty),
                       estimated_margin=str(qty*high),leverage=1,mode='isolated',confirmation=confirmation,
-                      initial_entry=str(reference),tp='6% above the confirmed combined average')
+                      initial_entry=str(reference),tp='Minimum valid quantity at +7%; remainder +15% from combined average' if self.c.long_split_tp else str(self.c.long_tp*100)+'% from combined average')
         except Exception as error:
             rejected=isinstance(error,ExchangeError) and error.rejected
             self.save_order(trade,status='rejected' if rejected else 'uncertain')

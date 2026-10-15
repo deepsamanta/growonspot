@@ -15,7 +15,7 @@ from test_scanner_strategy import INFO,PAIR
 class LongAverageTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.path=self.tmp.name+'/db';self.db=ScannerState(self.path)
-        self.now=time.time();self.c=ScannerConfig(enabled=True);self.ex=Mock();self.market=Mock();self.emit=Mock()
+        self.now=time.time();self.c=ScannerConfig(enabled=True,long_split_tp=False,long_tp=D('.06'));self.ex=Mock();self.market=Mock();self.emit=Mock()
         self.info={**INFO,'price_increment':'.0001'}
         d={'side':'BUY','order_id':'first','position_id':'position','quantity':'6','filled_quantity':'6',
            'fill':'1','initial_fill':'1','initial_quantity':'6','info':self.info,'leverage':1,'mode':'isolated',

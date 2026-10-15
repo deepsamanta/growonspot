@@ -9,6 +9,7 @@ from .averaging import ShortAverager, RECOVERABLE
 from .short_tp import split_plan
 from .resting_tp import RestingShortTakeProfit
 from .long_averaging import LongAverager,RECOVERABLE as LONG_RECOVERABLE
+from .long_tp import LongTakeProfit
 
 D=Decimal
 
@@ -21,6 +22,7 @@ class Engine:
         self.long_averager=LongAverager(self)
         self.balanced_capacity=BalanceCapacity(exchange,state)
         self.short_tp=RestingShortTakeProfit(self)
+        self.long_tp=LongTakeProfit(self)
 
     def capacity(self):
         return self.balanced_capacity.get()
@@ -169,6 +171,7 @@ class Engine:
         recoverable=RECOVERABLE if d.get('side')=='SELL' else LONG_RECOVERABLE
         if status=='CONFLICT' and not (d.get('position_id') and d.get('reason') in recoverable):
             if d['side']=='SELL' and self.c.short_split_tp:self.short_tp.cancel_resting(trade,'POSITION_CONFLICT')
+            if d['side']=='BUY' and self.c.long_split_tp:self.long_tp.cancel_resting(trade,'POSITION_CONFLICT')
             if d.get('average_order'):
                 (self.averager if d['side']=='SELL' else self.long_averager).cancel_own(trade,'POSITION_CONFLICT')
             return
@@ -180,6 +183,9 @@ class Engine:
             self.reconcile_pnl(trade);return
         if d['side']=='SELL' and self.c.short_split_tp:
             if not self.short_tp.prepare(trade):return
+            trade=self.db.get(ident);d=trade['data']
+        if d['side']=='BUY' and self.c.long_split_tp:
+            if not self.long_tp.prepare(trade):return
             trade=self.db.get(ident);d=trade['data']
         if not d.get('order_id'):
             if status!='UNCERTAIN':
@@ -227,6 +233,7 @@ class Engine:
         if not positions:
             if d.get('position_id'):
                 if d['side']=='SELL' and self.c.short_split_tp and not self.short_tp.cancel_resting(trade,'POSITION_CLOSED'):return
+                if d['side']=='BUY' and self.c.long_split_tp and not self.long_tp.cancel_resting(trade,'POSITION_CLOSED'):return
                 if d['side']=='BUY' and not self.long_averager.cancel_own(trade,'POSITION_CLOSED'):return
                 self.db.record_flat(ident,time.time())
                 self.reconcile_pnl(self.db.get(ident))
@@ -259,11 +266,14 @@ class Engine:
             self.db.update(ident,'PROTECTING',fill_alerted=True)
             self.emit('ENTRY_FILLED',pair=pair,side=d['side'],trade_id=ident,quantity=str(filled),
                       fill=str(fill),tp=str(tp),leverage=d['leverage'],mode=d['mode'],margin=str(filled*fill/d['leverage']),
-                      profit_plan='Resting 7% limit: 75% (or minimum valid quantity); native 20% TP after fill' if d['side']=='SELL' and self.c.short_split_tp else 'Full position at TP')
+                      profit_plan=('Resting 7% limit: 75% (or minimum valid quantity); native 20% TP after fill' if d['side']=='SELL' and self.c.short_split_tp
+                                   else 'Minimum valid quantity at +7% resting limit; remainder +15% TP after fill' if d['side']=='BUY' and self.c.long_split_tp else 'Full position at TP'))
         if decimal(p.get('stop_loss_trigger') or 0)!=0:
             self.conflict(self.db.get(ident),'UNEXPECTED_EXISTING_STOP_LOSS');return
         if d['side']=='SELL' and self.c.short_split_tp and self.short_tp.manage(self.db.get(ident),p):
             self.averager.maybe_place(self.db.get(ident));return
+        if d['side']=='BUY' and self.c.long_split_tp and self.long_tp.manage(self.db.get(ident),p):
+            self.long_averager.maybe_place(self.db.get(ident));return
         if decimal(p.get('take_profit_trigger') or 0)!=tp:
             # If the requested profit is already executable, take it once at market.
             exit_price=self.ex.price(pair,'SELL' if d['side']=='BUY' else 'BUY')
@@ -290,6 +300,8 @@ class Engine:
         self.db.update(trade['id'],'CONFLICT',reason=reason)
         if trade['data'].get('side')=='SELL' and self.c.short_split_tp:
             self.short_tp.cancel_resting(trade,'POSITION_CONFLICT')
+        if trade['data'].get('side')=='BUY' and self.c.long_split_tp:
+            self.long_tp.cancel_resting(trade,'POSITION_CONFLICT')
         self.emit('OWNERSHIP_CONFLICT',pair=trade['pair'],trade_id=trade['id'],reason=reason)
 
     def reconcile_pnl(self,trade):

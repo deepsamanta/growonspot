@@ -25,7 +25,9 @@ class ScannerConfig:
     short_limit_seconds: int = int(os.getenv('SCANNER_SHORT_LIMIT_SECONDS','14400'))
     long_margin: Decimal = Decimal('6')
     long_leverage: int = 1
-    long_tp: Decimal = Decimal('.06')
+    long_tp: Decimal = Decimal('.07')
+    long_split_tp: bool = True
+    long_runner_tp: Decimal = Decimal('.15')
     long_margin_cap: Decimal = Decimal(os.getenv('SCANNER_LONG_MARGIN_CAP','6.50'))
     scan_interval: int = int(os.getenv('SCANNER_SCAN_SECONDS','300'))
     poll: int = 5

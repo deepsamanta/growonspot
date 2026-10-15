@@ -24,7 +24,7 @@ class EngineTests(unittest.TestCase):
         self.market.quotes.return_value={PAIR:Quote(PAIR,D('.31'),D(1),self.now,D('.30'))}
         self.market.metadata.return_value={**INFO,'max_leverage_long':3,'max_leverage_short':3}
         self.market.eligible_metadata.return_value=True
-        self.c=ScannerConfig(enabled=True,short_split_tp=False)
+        self.c=ScannerConfig(enabled=True,short_split_tp=False,long_split_tp=False,long_tp=D('.06'))
         self.e=Engine(self.c,self.db,self.ex,self.market,self.emit)
         self.signal=Candidate(PAIR,'BUY',self.now,D('.30'),int(self.now-200*DAY),D(1))
     def tearDown(self):self.db.conn.close();self.tmp.cleanup()

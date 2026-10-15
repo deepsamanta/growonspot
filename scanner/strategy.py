@@ -3,7 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from .market import DAY, Candle, Quote, MarketDataError
+from .market import DAY, Candle, MarketDataError
 
 D = Decimal
 
