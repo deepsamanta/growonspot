@@ -30,7 +30,9 @@ TITLES={'ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitte
         'PARTIAL_TP_UNCERTAIN':'Partial profit exit needs review; no duplicate submission',
         'PARTIAL_TP_WAITING':'Short partial profit exit waiting',
         'SPLIT_TP_UNAVAILABLE':'Short is too small to split; original 7% TP retained',
-        'SCANNER_ERROR':'Scanner error','RECONCILE_ERROR':'Position reconciliation error'}
+        'SCANNER_ERROR':'Scanner error','RECONCILE_ERROR':'Position reconciliation error',
+        'WEBSOCKET_CONNECTED':'Exchange notifications connected; REST verification remains active',
+        'WEBSOCKET_UNAVAILABLE':'Exchange notifications unavailable; REST monitoring continues'}
 
 
 class Alerts:

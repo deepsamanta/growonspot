@@ -29,6 +29,7 @@ class ScannerConfig:
     long_margin_cap: Decimal = Decimal(os.getenv('SCANNER_LONG_MARGIN_CAP','6.50'))
     scan_interval: int = int(os.getenv('SCANNER_SCAN_SECONDS','300'))
     poll: int = 5
+    websocket_enabled: bool = os.getenv('SCANNER_WEBSOCKET_ENABLED','true').lower()=='true'
     health_port: int = int(os.getenv('SCANNER_HEALTH_PORT','8081'))
 
     def validate(self):
@@ -46,3 +47,5 @@ class ScannerConfig:
             raise ValueError('Short limit lifetime must be between 60 and 14400 seconds')
         if os.getenv('SCANNER_ENABLED','false').lower() not in ('true','false'):
             raise ValueError('SCANNER_ENABLED must be true or false')
+        if os.getenv('SCANNER_WEBSOCKET_ENABLED','true').lower() not in ('true','false'):
+            raise ValueError('SCANNER_WEBSOCKET_ENABLED must be true or false')

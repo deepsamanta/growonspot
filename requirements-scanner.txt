@@ -1,3 +1,7 @@
 requests>=2.32.3,<3
 python-dotenv>=1.0.1,<2
 tzdata>=2024.1
+# CoinDCX requires the Socket.IO v2 wire protocol.
+python-socketio==4.6.1
+python-engineio==3.14.2
+websocket-client>=1.8,<2

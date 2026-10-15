@@ -16,6 +16,7 @@ from .alerts import Alerts
 from .capacity import BalanceCapacity
 from .averaging import TRIGGER
 from .long_averaging import DROP
+from .stream import AccountStream
 
 
 def scan(config,outbox,health,emit,stopping):
@@ -82,6 +83,7 @@ def run(config):
     alerts=Alerts(config.bot_token,config.chat_id)
     market=MarketData();ex=Exchange(config,market);engine=Engine(config,db,ex,market,alerts.emit)
     stopping=threading.Event();outbox=queue.Queue(maxsize=32)
+    stream=AccountStream(config.key,config.secret,alerts.emit,enabled=config.websocket_enabled)
     health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
             'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
@@ -109,6 +111,7 @@ def run(config):
                 position_limits='Base: 5 total / 3 short / 2 long; +1 slot each $50 growth, alternating short/long',long_confirmation='4h consolidation or bullish reversal',
                 short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)
     try:
+        stream.start()
         while True:
             failed=False
             for trade in db.rows():
@@ -145,7 +148,7 @@ def run(config):
             review=any(t['status'] in ('UNCERTAIN','CONFLICT','CLOSING')
                        or t['data'].get('average_order',{}).get('cancel_unconfirmed') for t in occupied)
             health.update(status='degraded' if failed or health.get('scan_error') else 'review_required' if review else 'ok',
-                          active_positions=len(occupied),updated_at=time.time())
-            time.sleep(config.poll)
+                          active_positions=len(occupied),updated_at=time.time(),websocket=stream.snapshot())
+            stream.wait(config.poll)
     finally:
-        stopping.set();server.shutdown();alerts.close();db.conn.close();lock.close()
+        stopping.set();stream.close();server.shutdown();alerts.close();db.conn.close();lock.close()
