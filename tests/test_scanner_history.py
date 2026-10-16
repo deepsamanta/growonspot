@@ -1,7 +1,7 @@
 """Regression coverage for slow pair-wide CoinDCX trade-history queries."""
 import unittest
 from decimal import Decimal as D
-from unittest.mock import Mock
+from unittest.mock import Mock,patch
 from scanner.exchange import Exchange,ExchangeError
 from scanner.short_tp import replay_short
 
@@ -117,3 +117,86 @@ class TradeHistoryTests(unittest.TestCase):
     def test_gold_rejected_before_any_private_read(self):
         with self.assertRaises(ValueError):self.ex.trade_fills('B-XAU_USDT',SINCE)
         self.ex.transactions.assert_not_called();self.ex.pages.assert_not_called()
+
+
+class TransactionPaginationTests(unittest.TestCase):
+    def setUp(self):
+        self.ex=Exchange(Mock(),Mock())
+        self.ex.request=Mock()
+        self.sleep=patch('scanner.exchange.time.sleep')
+        self.sleep.start();self.addCleanup(self.sleep.stop)
+
+    def page(self,start,count=100):
+        return [ledger('tx-'+str(i),created_at=(SINCE+i)*1000)
+                for i in range(start,start-count,-1)]
+
+    def test_stable_history_stops_at_cutoff_and_verifies_head(self):
+        head=self.page(200);middle=self.page(100);old=self.page(-1)
+        self.ex.request.side_effect=[head,middle,old,head]
+        rows=self.ex.transactions(SINCE+50)
+        self.assertEqual(len(rows),151)
+        self.assertEqual([c.args[1]['page'] for c in self.ex.request.call_args_list],['1','2','3','1'])
+        self.assertTrue(all(c.args[1]['stage']=='all' for c in self.ex.request.call_args_list))
+
+    def test_funding_insertion_inversion_restarts_instead_of_crawling_100_pages(self):
+        head=self.page(200);new_head=self.page(205)
+        shifted=self.page(105)
+        self.ex.request.side_effect=[head,shifted,new_head,shifted,self.page(5),new_head]
+        rows=self.ex.transactions(SINCE+50)
+        self.assertEqual(len(rows),156)
+        self.assertEqual(len({r['parent_id'] for r in rows}),len(rows))
+        self.assertEqual([c.args[1]['page'] for c in self.ex.request.call_args_list],['1','2','1','2','3','1'])
+
+    def test_single_row_shift_without_inversion_cannot_double_count_profit(self):
+        head=self.page(200);new_head=self.page(201);shifted=self.page(101);old=self.page(1)
+        self.ex.request.side_effect=[head,shifted,old,new_head,new_head,shifted,old,new_head]
+        rows=self.ex.transactions(SINCE+50)
+        self.assertEqual(len(rows),152)
+        self.assertEqual(len({r['parent_id'] for r in rows}),len(rows))
+        self.assertEqual(self.ex.request.call_count,8)
+
+    def test_equal_timestamps_shift_is_detected_by_head_verification(self):
+        head=[ledger('first')];changed=[ledger('new'),ledger('first')]
+        self.ex.request.side_effect=[head,changed,changed,changed]
+        self.assertEqual([r['parent_id'] for r in self.ex.transactions(SINCE)],['new','first'])
+
+    def test_continuously_changing_history_fails_bounded_without_partial_rows(self):
+        self.ex.request.side_effect=[self.page(200),self.page(105)]*3
+        with self.assertRaisesRegex(ExchangeError,'kept changing'):
+            self.ex.transactions(SINCE)
+        self.assertEqual(self.ex.request.call_count,6)
+
+    def test_persistent_unsorted_page_is_rejected_without_ignoring_cutoff(self):
+        self.ex.request.return_value=[ledger('old',created_at=(SINCE-1)*1000),ledger('new')]
+        with self.assertRaisesRegex(ExchangeError,'kept changing'):
+            self.ex.transactions(SINCE)
+        self.assertEqual(self.ex.request.call_count,3)
+
+    def test_empty_history_is_verified_and_new_insert_is_not_lost(self):
+        row=[ledger('new')]
+        self.ex.request.side_effect=[[],row,row,row]
+        self.assertEqual(self.ex.transactions(SINCE),row)
+
+    def test_funding_exits_and_currency_filter_are_preserved(self):
+        rows=[ledger('entry'),ledger('funding',stage='funding'),
+              ledger('exit',stage='tpsl_exit'),ledger('inr',margin_currency_short_name='INR')]
+        self.ex.request.return_value=rows
+        self.assertEqual([r['parent_id'] for r in self.ex.transactions(SINCE)],['entry','funding','exit'])
+
+    def test_malformed_timestamp_cannot_make_a_snapshot_look_complete(self):
+        for stamp in (None,'nan','inf','bad'):
+            with self.subTest(stamp=stamp):
+                self.ex.request.return_value=[ledger('bad',created_at=stamp)]
+                with self.assertRaisesRegex(ExchangeError,'Invalid transaction timestamp'):
+                    self.ex.transactions(SINCE)
+
+    def test_read_failure_is_not_masked_by_partial_results(self):
+        self.ex.request.side_effect=[self.page(200),ExchangeError('ReadTimeout','positions/transactions')]
+        with self.assertRaisesRegex(ExchangeError,'ReadTimeout'):
+            self.ex.transactions(SINCE)
+
+    def test_genuine_page_limit_still_blocks_incomplete_history(self):
+        self.ex.request.side_effect=[self.page(20000-100*i) for i in range(100)]
+        with self.assertRaisesRegex(ExchangeError,'Incomplete pagination'):
+            self.ex.transactions(SINCE)
+        self.assertEqual(self.ex.request.call_count,100)

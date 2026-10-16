@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
@@ -21,6 +22,10 @@ class ExchangeError(RuntimeError):
     @property
     def rejected(self):
         return self.status in (400,401,403,404,422)
+
+
+class _TransactionHistoryChanged(ExchangeError):
+    """The offset-paginated ledger moved while it was being read."""
 
 
 def nongold(pair):
@@ -203,17 +208,41 @@ class Exchange:
         return fills
 
     def transactions(self,since):
+        # Funding and fills can insert rows between requests, shifting page
+        # boundaries. Discard the entire read and restart; never disable the
+        # date cutoff and crawl the account's full history on an inversion.
+        for attempt in range(3):
+            try:
+                return self._transactions_snapshot(since)
+            except _TransactionHistoryChanged:
+                if attempt==2:
+                    raise ExchangeError('Transaction history kept changing; retry on next reconciliation',
+                                        'positions/transactions') from None
+                time.sleep(.5*(attempt+1))
+
+    def _transactions_snapshot(self,since):
+        path='positions/transactions';extra={'stage':'all'}
         result=[]
         last_time=float('inf')
-        ordered=True
-        for page in self.pages('positions/transactions',{'stage':'all'}):
+        first_page=None
+        for page in self.pages(path,extra):
+            if first_page is None:first_page=page
             for row in page:
-                stamp=float(row['created_at'])/1000
-                if stamp>last_time:ordered=False
+                try:
+                    stamp=float(row['created_at'])/1000
+                    if not math.isfinite(stamp):raise ValueError('Non-finite timestamp')
+                except (KeyError,TypeError,ValueError,OverflowError):
+                    raise ExchangeError('Invalid transaction timestamp',path) from None
+                if stamp>last_time:
+                    raise _TransactionHistoryChanged('Transaction history order changed',path)
                 last_time=stamp
                 if stamp>=since and row.get('margin_currency_short_name','USDT')=='USDT':result.append(row)
-            if page and ordered and max(float(r['created_at'])/1000 for r in page)<since:
-                return result
+            if page and float(page[0]['created_at'])/1000<since:break
+        # A one-row shift (or rows sharing a timestamp) can duplicate a ledger
+        # record without a timestamp inversion. Verify the head also stayed
+        # unchanged before using any rows for PnL or manual-order attribution.
+        if next(self.pages(path,extra))!=first_page:
+            raise _TransactionHistoryChanged('Transaction history head changed',path)
         return result
 
     def price(self,pair,side):
