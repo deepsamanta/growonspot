@@ -1,0 +1,10 @@
+**
+!Dockerfile.binance
+!requirements-binance.txt
+!scanner/
+!scanner/**
+!binance_scanner/
+!binance_scanner/**
+**/__pycache__/
+**/*.pyc
+**/._*

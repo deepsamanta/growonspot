@@ -7,3 +7,5 @@ sessions/*
 
 .env.scanner
 scanner-data/
+.env.binance
+binance-data/

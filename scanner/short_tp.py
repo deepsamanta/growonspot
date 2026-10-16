@@ -13,7 +13,8 @@ def partial_quantity(info,qty,price,preferred=None):
     step=decimal(info['quantity_increment'],True)
     minimum=max(decimal(info['min_quantity'],True),decimal(info.get('min_trade_size',info['min_quantity']),True))
     minimum=(minimum/step).to_integral_value(rounding=ROUND_UP)*step
-    min_notional=decimal(info['min_notional'],True)
+    min_notional=decimal(info.get('close_min_notional',info['min_notional']))
+    if min_notional<0:raise ValueError('INVALID_CLOSE_MIN_NOTIONAL')
     maximum=min(decimal(info['max_market_order_quantity'],True),decimal(info['max_quantity'],True))
     part=(qty*D('.75')/step).to_integral_value(rounding=ROUND_DOWN)*step if preferred is None else preferred
     if qty<=0 or qty%step or part%step:raise ValueError('INVALID_SHORT_SPLIT_QUANTITY')

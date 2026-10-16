@@ -132,3 +132,9 @@ The September 24 10:01 signal is included as an exact-image regression fixture.
 Repeated OCR arrow glyphs (such as `4285.37→→4286.29`) are normalized before
 parsing; price fields are unchanged. Its NEW-caption path is checked through
 the message processor with trading mocked, so no test orders are placed.
+
+## Binance crypto scanner
+
+A separate Binance USD-M version of the crypto scanner is available. It uses its own
+credentials, database, Docker service and port 8082. See [BINANCE.md](BINANCE.md) for
+strategy details, account requirements, read-only checks and deployment commands.

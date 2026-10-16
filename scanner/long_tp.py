@@ -10,7 +10,9 @@ def minimum_partial(info, qty, price):
     step = decimal(info['quantity_increment'], True)
     minimum = max(decimal(info['min_quantity'], True), decimal(info.get('min_trade_size', info['min_quantity']), True))
     minimum = (minimum / step).to_integral_value(rounding=ROUND_UP) * step
-    part = (max(minimum, decimal(info['min_notional'], True) / decimal(price, True)) / step).to_integral_value(rounding=ROUND_UP) * step
+    close_notional = decimal(info.get('close_min_notional', info['min_notional']))
+    if close_notional < 0:raise ValueError('INVALID_CLOSE_MIN_NOTIONAL')
+    part = (max(minimum, close_notional / decimal(price, True)) / step).to_integral_value(rounding=ROUND_UP) * step
     if qty <= 0 or qty % step:
         raise ValueError('INVALID_LONG_SPLIT_QUANTITY')
     if part > decimal(info['max_quantity'], True):

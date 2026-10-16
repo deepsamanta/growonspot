@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY requirements-binance.txt ./
+RUN pip install --no-cache-dir -r requirements-binance.txt
+COPY scanner ./scanner
+COPY binance_scanner ./binance_scanner
+CMD ["python", "-m", "binance_scanner", "--run"]
