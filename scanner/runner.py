@@ -12,6 +12,7 @@ from .strategy import History,evaluate
 from .exchange import Exchange,SHORT_RESISTANCE_OFFSET
 from .engine import Engine
 from .alerts import Alerts
+from .control import RuntimeConfig, TelegramControl
 from .capacity import BalanceCapacity
 from .averaging import TRIGGER
 from .long_averaging import DROP
@@ -30,13 +31,13 @@ def scan(config,outbox,health,emit,stopping):
             checked=time.time()
             health.update(account_capacity=capacity.report(),capacity_checked=checked,scan_error=None)
             if not config.enabled or not (capacity.allows('BUY') or capacity.allows('SELL')):
-                health.update(scan_paused_reason='ACCOUNT_POSITION_LIMIT' if config.enabled else 'ENTRIES_DISABLED',scan_updated=checked)
-                stopping.wait(30);continue
+                health.update(scan_paused_reason='USER_PAUSED' if getattr(config,'paused',False) else 'ACCOUNT_POSITION_LIMIT' if config.enabled else 'ENTRIES_DISABLED',scan_updated=checked)
+                stopping.wait(5 if getattr(config,'paused',False) else 30);continue
             instruments=market.active_instruments();quotes=market.quotes()
             health.update(active_instruments=len(instruments),scan_started=started,scan_error=None,scan_paused_reason=None)
             held={r['pair'] for r in db.rows() if r['status'] not in ('CLOSED','REJECTED')}
             for index,pair in enumerate(instruments):
-                if stopping.is_set():break
+                if stopping.is_set() or not config.enabled:break
                 if time.time()-checked>15:
                     capacity=balance_capacity.get();checked=time.time()
                 if not (capacity.allows('BUY') or capacity.allows('SELL')):
@@ -71,15 +72,19 @@ def scan(config,outbox,health,emit,stopping):
         except Exception as error:
             health.update(scan_error=type(error).__name__)
             emit('SCANNER_ERROR',error_type=type(error).__name__)
-        stopping.wait(max(1,config.scan_interval-(time.time()-started)))
+        delay=max(1,config.scan_interval-(time.time()-started))
+        if isinstance(config,RuntimeConfig):config.wait_scan(stopping,delay)
+        else:stopping.wait(delay)
     db.conn.close()
 
 
 def run(config):
+    config=RuntimeConfig(config)
     config.validate();Path(config.database).parent.mkdir(parents=True,exist_ok=True)
     lock=open(config.database+'.lock','w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     db=ScannerState(config.database,config.timezone)
     alerts=Alerts(config.bot_token,config.chat_id)
+    control=TelegramControl(config,db,alerts)
     market=MarketData();ex=Exchange(config,market);engine=Engine(config,db,ex,market,alerts.emit)
     stopping=threading.Event();outbox=queue.Queue(maxsize=32)
     stream=AccountStream(config.key,config.secret,alerts.emit,enabled=config.websocket_enabled)
@@ -109,13 +114,16 @@ def run(config):
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / minimum valid quantity at +7%, remainder +15%',stop_loss='none',
                 long_averaging='Once after >60% drop from first fill + completed 4h recovery; $6 (minimum-size cap $6.50), 1x isolated; profit targets follow combined average; partial TP does not reset averaging',
                 position_limits='Base: 5 total / 3 short / 2 long; +1 slot each $50 growth, alternating short/long',long_confirmation='4h consolidation or bullish reversal',
-                short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval)
+                short_distance=str(config.short_distance),short_limit_seconds=config.short_limit_seconds,scan_seconds=config.scan_interval,
+                telegram_commands='Post stop, start, or status in this channel; controls CoinDCX scanner only')
     try:
-        stream.start()
+        control.start();stream.start()
         while True:
+            control.apply_pending()
             failed=False
             for trade in db.rows():
                 if trade['status'] in ('CLOSED','REJECTED'):continue
+                control.apply_pending()
                 try:engine.reconcile(trade)
                 except Exception as error:
                     failed=True
@@ -133,6 +141,7 @@ def run(config):
                 try:candidate=outbox.get_nowait()
                 except queue.Empty:break
                 try:
+                    control.apply_pending()
                     if not failed:engine.enter(candidate)
                 except ValueError as error:
                     alerts.emit('ENTRY_SKIPPED',pair=candidate.pair,reason=str(error))
@@ -148,7 +157,8 @@ def run(config):
             review=any(t['status'] in ('UNCERTAIN','CONFLICT','CLOSING')
                        or t['data'].get('average_order',{}).get('cancel_unconfirmed') for t in occupied)
             health.update(status='degraded' if failed or health.get('scan_error') else 'review_required' if review else 'ok',
-                          active_positions=len(occupied),updated_at=time.time(),websocket=stream.snapshot())
+                          active_positions=len(occupied),updated_at=time.time(),websocket=stream.snapshot(),
+                          enabled=config.enabled,user_paused=config.paused,telegram_commands=dict(control.health))
             stream.wait(config.poll)
     finally:
-        stopping.set();stream.close();server.shutdown();alerts.close();db.conn.close();lock.close()
+        stopping.set();control.close();stream.close();server.shutdown();alerts.close();db.conn.close();lock.close()

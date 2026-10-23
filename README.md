@@ -138,3 +138,27 @@ the message processor with trading mocked, so no test orders are placed.
 A separate Binance USD-M version of the crypto scanner is available. It uses its own
 credentials, database, Docker service and port 8082. See [BINANCE.md](BINANCE.md) for
 strategy details, account requirements, read-only checks and deployment commands.
+
+### Pause/resume the CoinDCX market scanner from Telegram
+
+Post `stop`, `start`, or `status` in the configured scanner alert channel. Slash
+forms `/stop`, `/start`, `/status` and commands addressed to the bot also work.
+The scanner acknowledges **INACTIVE** or **ACTIVE**. This controls only the
+CoinDCX crypto scanner; gold and Binance are unaffected.
+
+`stop` pauses new entries and automatic averaging. It requests cancellation of
+verified bot-owned pending entries and averaging orders; exchange cancellation
+can race with a fill, which is then reconciled normally. Existing positions remain
+open and their profit exits continue to be managed. Manual orders are untouched.
+`start` resumes the existing strategy, subject to its normal capacity, eligibility,
+and profit-lock rules. It cannot override `SCANNER_ENABLED=false` on the server.
+The pause state and Telegram update checkpoint survive container restarts.
+
+Only the configured chat is accepted. Channel posts are accepted; group commands
+require an administrator, and private-chat commands require the matching user.
+Edited/forwarded posts and phrases merely containing “stop” are ignored. Commands
+are applied between exchange operations; an already-running request completes first.
+Groups with Telegram privacy mode may require `/stop@your_bot` or a reply to the bot.
+See [Telegram's message delivery rules](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
+Only the CoinDCX scanner polls this shared bot token; do not run another
+`getUpdates` consumer with the same token. Existing webhooks are never removed.

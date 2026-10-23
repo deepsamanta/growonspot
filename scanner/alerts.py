@@ -5,7 +5,7 @@ import threading
 import time
 import requests
 
-TITLES={'ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
+TITLES={'COMMAND_ERROR':'Telegram command listener unavailable','ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
         'LIMIT_SUBMITTED':'Short limit resting 2% above resistance','LIMIT_CANCEL_REQUESTED':'Entry remainder cancellation requested',
         'LIMIT_CANCELLED':'Unfilled short limit cancelled','CANCEL_UNCERTAIN':'Entry cancellation needs review',
         'ORDER_REJECTED':'Entry rejected','ORDER_UNCERTAIN':'Entry outcome requires review',
@@ -59,6 +59,10 @@ class Alerts:
         text='[MARKET SCANNER] '+TITLES[event]+'\n'+'\n'.join(f'{k}: {str(v)[:200]}' for k,v in fields.items())
         try:self.pending.put_nowait(text[:4000])
         except queue.Full:print(json.dumps({'event':'SCANNER_ALERT_QUEUE_FULL'}),flush=True)
+
+    def reply(self,text):
+        try:self.pending.put_nowait(text[:4000])
+        except queue.Full:print(json.dumps({'event':'SCANNER_COMMAND_REPLY_QUEUE_FULL'}),flush=True)
 
     def run(self):
         session=requests.Session()
