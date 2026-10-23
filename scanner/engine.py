@@ -205,9 +205,7 @@ class Engine:
             trade=self.db.get(ident)
         if order['status'] not in ('filled','cancelled','partially_cancelled','rejected'):
             reason=None
-            if getattr(self.c,'paused',False):
-                reason='USER_PAUSED'
-            elif d.get('cancel_requested'):
+            if d.get('cancel_requested'):
                 reason=d.get('cancel_reason','CANCELLATION_PENDING')
             elif d.get('order_type')=='limit_order':
                 if filled>0:reason='PARTIAL_FILL_REMAINDER'
@@ -226,9 +224,6 @@ class Engine:
         positions=[p for p in self.ex.positions(pair) if decimal(p['active_pos'])!=0]
         initial_qty=filled
         fill=None
-        if d.get('position_id') and getattr(self.c,'paused',False):
-            (self.averager if d['side']=='SELL' else self.long_averager).cancel_own(trade,'USER_PAUSED')
-            trade=self.db.get(ident);d=trade['data']
         if d.get('position_id'):
             averager=self.averager if d['side']=='SELL' else self.long_averager
             reconciled=averager.sync(trade,positions,order,initial_qty)

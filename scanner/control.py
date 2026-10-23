@@ -145,8 +145,8 @@ class TelegramControl:
                     text = '[MARKET SCANNER] ACTIVE — new entries and automatic averaging enabled.'
                 elif self.c.paused:
                     text = ('[MARKET SCANNER] INACTIVE — new entries and automatic averaging paused. '
-                            'Bot-owned pending entry/averaging orders will be cancelled as they are verified. '
-                            'Existing positions and profit exits remain monitored; manual orders are unchanged.')
+                            'Existing positions and orders are unchanged and profit monitoring continues. '
+                            'Pending orders may still fill.')
                 else:
                     text = '[MARKET SCANNER] INACTIVE — trading is disabled in server configuration.'
                 self.alerts.reply(text)

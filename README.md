@@ -146,10 +146,10 @@ forms `/stop`, `/start`, `/status` and commands addressed to the bot also work.
 The scanner acknowledges **INACTIVE** or **ACTIVE**. This controls only the
 CoinDCX crypto scanner; gold and Binance are unaffected.
 
-`stop` pauses new entries and automatic averaging. It requests cancellation of
-verified bot-owned pending entries and averaging orders; exchange cancellation
-can race with a fill, which is then reconciled normally. Existing positions remain
-open and their profit exits continue to be managed. Manual orders are untouched.
+`stop` pauses new entries and new automatic averaging orders. It does not cancel
+or change existing orders or positions. Existing pending orders can still fill;
+normal reconciliation, expiry rules, and profit-exit monitoring continue. Manual
+orders are untouched.
 `start` resumes the existing strategy, subject to its normal capacity, eligibility,
 and profit-lock rules. It cannot override `SCANNER_ENABLED=false` on the server.
 The pause state and Telegram update checkpoint survive container restarts.

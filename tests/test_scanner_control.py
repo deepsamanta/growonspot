@@ -69,13 +69,13 @@ class PausedExecutionTests(test_scanner_engine.EngineTests):
     def test_stop_prevents_new_entry(self):
         self.c.paused=True;self.e.enter(self.signal)
         self.ex.create.assert_not_called();self.assertEqual(self.db.rows(),[])
-    def test_stop_cancels_only_pending_entry(self):
+    def test_stop_preserves_pending_entry(self):
         trade=self.enter();d=trade['data'];self.c.paused=True
         order={'id':'order1','status':'open','total_quantity':d['quantity'],'remaining_quantity':d['quantity']}
         self.ex.find_order.return_value=order
         self.e.reconcile(trade)
-        self.ex.cancel.assert_called_once_with(trade['pair'],order)
-        self.assertEqual(self.db.get(trade['id'])['data']['cancel_reason'],'USER_PAUSED')
+        self.ex.cancel.assert_not_called()
+        self.assertFalse(self.db.get(trade['id'])['data'].get('cancel_requested'))
     def test_stop_keeps_profit_management(self):
         trade,position=self.filled();self.c.paused=True
         self.e.reconcile(trade)
