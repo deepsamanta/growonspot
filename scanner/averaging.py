@@ -176,7 +176,8 @@ class ShortAverager:
     def maybe_place(self,trade):
         d=trade['data'];pair=trade['pair'];now=time.time()
         if (not self.c.enabled or trade['status']!='OPEN' or d['side']!='SELL'
-                or d.get('averaging_used') or d.get('order_type')!='limit_order'):return
+                or d.get('averaging_used') or (d.get('order_type')!='limit_order'
+                    and d.get('confirmation')!='ATH_15M_SURGE')):return
         nongold(pair)
         if not self.e.capacity().within_limits:return
         price=self.ex.price(pair,'SELL')

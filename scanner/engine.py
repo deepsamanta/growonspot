@@ -10,6 +10,7 @@ from .short_tp import split_plan
 from .resting_tp import RestingShortTakeProfit
 from .long_averaging import LongAverager,RECOVERABLE as LONG_RECOVERABLE
 from .long_tp import LongTakeProfit
+from .ath_short import RULE as ATH_RULE, valid_now as valid_ath
 
 D=Decimal
 
@@ -39,10 +40,14 @@ class Engine:
         if not self.c.enabled:
             return
         pair,side=candidate.pair,candidate.side
+        ath=candidate.confirmation==ATH_RULE
+        if ath and (side!='SELL' or not getattr(self.c,'ath_short_enabled',False)):return
         if pair=='B-XAU_USDT':raise ValueError('Gold is excluded')
         capacity=self.capacity()
         if not capacity.allows(side) or pair in capacity.pairs:
-            self.emit('ENTRY_SKIPPED',pair=pair,reason='ACCOUNT_POSITION_LIMIT',**capacity.report());return
+            event='ATH_SIGNAL_CAPACITY_BLOCKED' if ath and pair not in capacity.pairs else 'ENTRY_SKIPPED'
+            self.emit(event,pair=pair,side=side,reason='ACCOUNT_POSITION_LIMIT',
+                      observed_at=candidate.observed_at,reference=str(candidate.reference),**capacity.report());return
         if any(r['pair']==pair and r['status'] not in ('CLOSED','REJECTED') for r in self.db.rows()):return
         now=time.time()
         cooldown=self.db.cache('rejection:'+pair)
@@ -55,7 +60,9 @@ class Engine:
         price=self.ex.price(pair,side)
         if side=='SELL':
             current=max(price,quote.price,quote.mark_price or quote.price)
-            if quote.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:return
+            if ath:
+                if not valid_ath(candidate,quote,price,self.market,time.time()):return
+            elif quote.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:return
             margin,leverage,mode,pct=self.c.short_margin,self.c.short_leverage,'crossed',self.c.short_tp
             cap=None
         else:
@@ -74,13 +81,13 @@ class Engine:
         # current dynamic position/leverage table for every entry.
         if side_limit is not None and decimal(side_limit)<leverage:
             raise ValueError('LEVERAGE_NOT_SUPPORTED')
-        limit=short_limit_price(info,candidate.reference,quote.price) if side=='SELL' else None
+        limit=short_limit_price(info,candidate.reference,quote.price) if side=='SELL' and not ath else None
         if limit is not None and info.get('order_types') and 'limit_order' not in info['order_types']:
             raise ValueError('LIMIT_ORDERS_NOT_SUPPORTED')
         sizing_price=max(limit or price,quote.price,quote.mark_price or quote.price)
         minimum_price=min(price,quote.price,quote.mark_price or quote.price)
         qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
-        if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit)
+        if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit or price)
         tp=target(info,side,limit or price,pct)
         if any(decimal(p.get(k,0))!=0 for p in self.ex.positions(pair)
                for k in ('active_pos','inactive_pos_buy','inactive_pos_sell')):return
@@ -97,8 +104,11 @@ class Engine:
               'order_type':'limit_order' if limit is not None else 'market_order',
               'limit_price':str(limit) if limit is not None else None,
               'expires_at':now+self.c.short_limit_seconds if limit is not None else None,
-              'confirmation':confirmation if side=='BUY' else 'WEEKLY_RESISTANCE','info':info}
-        key=f'{pair}:{side}:{int(candidate.observed_at//300)}'
+              'confirmation':confirmation if side=='BUY' else ATH_RULE if ath else 'WEEKLY_RESISTANCE','info':info,
+              'signal_candle_at':candidate.candle_at,'reference_end':candidate.reference_end,
+              'signal_candle_open':str(candidate.candle_open) if ath else None,
+              'signal_candle_high':str(candidate.candle_high) if ath else None}
+        key=f'{pair}:ATH:{candidate.candle_at}' if ath else f'{pair}:{side}:{int(candidate.observed_at//300)}'
         ident,reason=self.db.reserve(key,pair,data,capacity.max_total,now,{'BUY':capacity.max_longs,'SELL':capacity.max_shorts})
         if ident is None:
             self.emit('ENTRY_SKIPPED',pair=pair,reason=reason);return
@@ -114,16 +124,20 @@ class Engine:
             price=self.ex.price(pair,side)
             if side=='SELL':
                 current=max(price,latest.price,latest.mark_price or latest.price)
-                if latest.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:
-                    raise ValueError('SHORT_LEFT_RESISTANCE_BAND')
-                limit=short_limit_price(info,candidate.reference,latest.price)
+                if ath:
+                    if not valid_ath(candidate,latest,price,self.market,time.time()):
+                        raise ValueError('ATH_SURGE_NO_LONGER_VALID')
+                else:
+                    if latest.change_24h<=35 or not candidate.reference*(1-self.c.short_distance)<=current<candidate.reference:
+                        raise ValueError('SHORT_LEFT_RESISTANCE_BAND')
+                    limit=short_limit_price(info,candidate.reference,latest.price)
             elif (price>min(candidate.reference,latest.low_24h or latest.price,latest.price)*D('1.10')
                     or not long_confirmation(intraday,time.time(),price)):
                 raise ValueError('LONG_CONFIRMATION_NO_LONGER_VALID')
             sizing_price=max(limit or price,latest.price,latest.mark_price or latest.price)
             minimum_price=min(price,latest.price,latest.mark_price or latest.price)
             qty=quantity(info,sizing_price,margin,leverage,cap,minimum_price)
-            if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit)
+            if side=='SELL' and self.c.short_split_tp:split_plan(info,qty,limit or price)
             tp=target(info,side,limit or price,pct)
             self.db.update(ident,'RESERVED',quantity=str(qty),tp=str(tp),market_price=str(price),
                            estimated_margin=str(qty*sizing_price/leverage),submitted_at=time.time(),
@@ -138,6 +152,8 @@ class Engine:
             self.db.update(ident,'SUBMITTED',order_id=order_id)
             self.emit('LIMIT_SUBMITTED' if limit is not None else 'ORDER_SUBMITTED',pair=pair,side=side,trade_id=ident,
                       order_id=order_id,limit_price=str(limit) if limit is not None else None,
+                      rule=data['confirmation'],observed_at=candidate.observed_at,reference=str(candidate.reference),
+                      candle_at=candidate.candle_at,candle_open=data['signal_candle_open'],candle_high=data['signal_candle_high'],
                       expires_in_seconds=self.c.short_limit_seconds if limit is not None else None)
         except Exception as error:
             rejected=not submitted or isinstance(error,ExchangeError) and error.rejected

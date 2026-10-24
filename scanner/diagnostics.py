@@ -3,6 +3,7 @@ import time
 from decimal import Decimal
 from .market import DAY
 from .strategy import weekly_resistances
+from .ath_short import detect as detect_ath
 
 
 def blocked_shorts(config, capacity, market, history, emit, stopping):
@@ -18,8 +19,19 @@ def blocked_shorts(config, capacity, market, history, emit, stopping):
         if time.time()-checked_at > 30:
             emit('SCAN_DIAGNOSTIC_INCOMPLETE',reason='READ_BUDGET_EXHAUSTED')
             return
-        if pair not in instruments or pair == 'B-XAU_USDT' or quote.change_24h <= 35:
+        if pair not in instruments or pair == 'B-XAU_USDT':
             continue
+        if getattr(config,'ath_short_enabled',False) and pair not in capacity.pairs:
+            try:
+                candidate=detect_ath(pair,quote,market,history,time.time())
+                if candidate:
+                    emit('ATH_SIGNAL_CAPACITY_BLOCKED',pair=pair,side='SELL',reason='ACCOUNT_POSITION_LIMIT',
+                         price=str(quote.price),prior_ath=str(candidate.reference),observed_at=quote.timestamp,
+                         candle_at=candidate.candle_at,candle_open=str(candidate.candle_open),
+                         candle_high=str(candidate.candle_high),execution_checks='NOT_RUN',**capacity.report())
+            except Exception as error:
+                emit('ATH_SIGNAL_NOT_EVALUATED',pair=pair,reason='DATA_ERROR',error_type=type(error).__name__)
+        if quote.change_24h<=35:continue
         fields = dict(pair=pair, side='SELL', price=str(quote.price),
                       change_24h=str(quote.change_24h), observed_at=quote.timestamp,
                       capacity_checked_at=checked_at, **capacity.report())

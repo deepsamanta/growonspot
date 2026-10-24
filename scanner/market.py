@@ -32,6 +32,7 @@ class Quote:
     timestamp: float
     low_24h: Decimal = None
     mark_price: Decimal = None
+    high_24h: Decimal = None
 
 
 @dataclass(frozen=True)
@@ -123,12 +124,15 @@ class MarketData:
                 mark=None
                 if row.get('mp') is not None and -30<=now-float(row.get('bmST',0))/1000<=max_age:
                     mark=decimal(row['mp'],True)
-                result[pair] = Quote(pair, decimal(row['ls'], True), decimal(row['pc']), stamp, decimal(row.get('l',row['ls']),True),mark)
+                try:high=decimal(row['h'],True) if row.get('h') is not None else None
+                except MarketDataError:high=None
+                result[pair] = Quote(pair, decimal(row['ls'], True), decimal(row['pc']), stamp, decimal(row.get('l',row['ls']),True),mark,
+                                     high)
             except (MarketDataError, KeyError, TypeError, ValueError):
                 continue
         return result
 
-    def candles(self, pair, start, end, resolution='1D', seconds=DAY):
+    def candles(self, pair, start, end, resolution='1D', seconds=DAY, include_open=False):
         """Fetch bounded chunks; errors never masquerade as an empty history."""
         if seconds <= 0 or start >= end:
             raise ValueError('Invalid candle interval')
@@ -145,13 +149,30 @@ class MarketData:
                 raise MarketDataError('Invalid candle history')
             for row in rows:
                 candle = Candle.from_api(row)
-                if cursor <= candle.timestamp < stop and candle.timestamp + seconds <= self.clock():
+                if (cursor <= candle.timestamp < stop and candle.timestamp <= self.clock()
+                        and (include_open or candle.timestamp + seconds <= self.clock())):
                     prior = found.get(candle.timestamp)
                     if prior is not None and prior != candle:
                         raise MarketDataError('Conflicting candle records')
                     found[candle.timestamp] = candle
             cursor = stop
         return sorted(found.values(), key=lambda c: c.timestamp)
+
+    def fifteen_minute(self,pair,now):
+        """Build current/previous 15m bars from documented one-minute candles."""
+        current=int(now//900)*900;minute=int(now//60)*60
+        rows={c.timestamp:c for c in self.candles(pair,current-900,minute+60,'1',60,include_open=True)}
+        result=[]
+        for start in (current-900,current):
+            end=min(start+900,minute)
+            required=list(range(start,end,60))
+            if not required:required=[start]
+            if any(t not in rows for t in required):continue
+            group=[rows[t] for t in required]
+            if start==current and minute in rows and minute not in required:group.append(rows[minute])
+            result.append(Candle(start,group[0].open,max(c.high for c in group),min(c.low for c in group),
+                                group[-1].close,sum(c.volume for c in group)))
+        return result
 
     def four_hour(self,pair,now):
         # CoinDCX documents 60-minute candles; form 4h bars only from all four

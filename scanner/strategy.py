@@ -17,6 +17,10 @@ class Candidate:
     history_first: int
     change_24h: Decimal
     confirmation: str = ''
+    candle_at: int = None
+    reference_end: int = None
+    candle_open: Decimal = None
+    candle_high: Decimal = None
 
 
 FOUR_HOURS=4*3600

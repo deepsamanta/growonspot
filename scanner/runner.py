@@ -18,6 +18,7 @@ from .averaging import TRIGGER
 from .long_averaging import DROP
 from .stream import AccountStream
 from .diagnostics import blocked_shorts
+from .ath_short import watch as watch_ath
 
 
 def scan(config,outbox,health,emit,stopping):
@@ -77,7 +78,7 @@ def scan(config,outbox,health,emit,stopping):
                         intraday=market.four_hour(pair,now)
                         candidate=evaluate(pair,quote,daily,now,low,first,intraday,allow_short=capacity.allows('SELL'),short_distance=config.short_distance)
                     if candidate:
-                        emit('SIGNAL_MATCHED',pair=pair,side=candidate.side,price=str(quote.price),change_24h=str(quote.change_24h),reference=str(candidate.reference),observed_at=quote.timestamp,**capacity.report())
+                        emit('SIGNAL_MATCHED',pair=pair,side=candidate.side,rule=candidate.confirmation or 'WEEKLY_RESISTANCE',price=str(quote.price),change_24h=str(quote.change_24h),reference=str(candidate.reference),observed_at=quote.timestamp,**capacity.report())
                         try:outbox.put_nowait(candidate)
                         except queue.Full:emit('ENTRY_SKIPPED',pair=pair,reason='CANDIDATE_QUEUE_FULL')
                     stopping.wait(.05)
@@ -105,6 +106,8 @@ def run(config):
     stream=AccountStream(config.key,config.secret,alerts.emit,enabled=config.websocket_enabled)
     health={'status':'starting','enabled':config.enabled,'updated_at':time.time(),'active_positions':0,
             'scan_seconds':config.scan_interval,'short_order_type':'limit_order',
+            'ath_short_enabled':config.ath_short_enabled,'ath_short_order_type':'market_order',
+            'ath_scan_seconds':config.ath_scan_interval,
             'short_resistance_offset':str(SHORT_RESISTANCE_OFFSET),
             'short_average_trigger':str(TRIGGER),'short_average_once':'per_cycle_including_manual',
             'short_tp_split':'Resting limit: 75% (or minimum valid quantity) at 7%; native 20% after fill',
@@ -124,7 +127,12 @@ def run(config):
     server=HTTPServer(('0.0.0.0',config.health_port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     worker=threading.Thread(target=scan,args=(config,outbox,health,alerts.emit,stopping),daemon=True);worker.start()
+    ath_worker=None
+    if config.ath_short_enabled:
+        ath_worker=threading.Thread(target=watch_ath,args=(config,outbox,health,alerts.emit,stopping),daemon=True)
+        ath_worker.start()
     alerts.emit('SCANNER_STARTED',enabled=config.enabled,base_max_positions=5,short='Resistance +2% LIMIT / 3 USDT / 3x / crossed / resting 7% profit limit, native 20% TP after first fill',
+                ath_short='Prior IST-day ATH breakout + >=35% 15m open-to-high surge / MARKET / 3 USDT / 3x crossed' if config.ath_short_enabled else 'disabled',
                 short_average_trigger=str(TRIGGER),
                 long='6 USDT (minimum-size cap 6.50) / 1x / isolated / minimum valid quantity at +7%, remainder +15%',stop_loss='none',
                 long_averaging='Once after >60% drop from first fill + completed 4h recovery; $6 (minimum-size cap $6.50), 1x isolated; profit targets follow combined average; partial TP does not reset averaging',
@@ -168,10 +176,12 @@ def run(config):
                 finally:outbox.task_done()
             if not worker.is_alive():
                 failed=True;alerts.emit('SCANNER_ERROR',reason='DATA_WORKER_STOPPED')
+            if ath_worker is not None and not ath_worker.is_alive():
+                failed=True;alerts.emit('SCANNER_ERROR',reason='ATH_WORKER_STOPPED')
             occupied=db.occupied()
             review=any(t['status'] in ('UNCERTAIN','CONFLICT','CLOSING')
                        or t['data'].get('average_order',{}).get('cancel_unconfirmed') for t in occupied)
-            health.update(status='degraded' if failed or health.get('scan_error') else 'review_required' if review else 'ok',
+            health.update(status='degraded' if failed or health.get('scan_error') or health.get('ath_error') else 'review_required' if review else 'ok',
                           active_positions=len(occupied),updated_at=time.time(),websocket=stream.snapshot(),
                           enabled=config.enabled,user_paused=config.paused,telegram_commands=dict(control.health))
             stream.wait(config.poll)

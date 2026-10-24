@@ -185,3 +185,36 @@ not a claim about the first market tick when it became eligible.
 Diagnostics never queue candidates or submit/cancel orders. Normal capacity
 checks are refreshed afterward. Existing trading and position-management rules
 are unchanged. Log retention remains the configured Docker rotation policy.
+
+### Additional CoinDCX ATH surge short entry
+
+Enable with `SCANNER_ATH_SHORT_ENABLED=true` in `.env.scanner`.
+`SCANNER_ATH_SCAN_SECONDS=30` sets the separate watcher's target polling interval;
+API latency and reconciliation can delay execution. It is not tick-by-tick entry.
+The ordinary five-minute weekly-resistance and ATL scan remains unchanged.
+
+A new market short is eligible when the current or immediately previous
+15-minute candle has a high at least 35% above its open, and the current price
+remains strictly above the highest price in complete available CoinDCX futures
+history **before today's midnight IST**. A wick counts even after a pullback;
+older 15-minute spikes are not reused. The watcher constructs bars from documented
+one-minute REST candles, requires every elapsed constituent minute, and accepts
+the ongoing candle. An unavailable forming-minute candle may delay detection.
+The ATH uses completed UTC daily history plus five-minute candles up to the IST
+boundary, never today's highs. At least 100 days of history is still required.
+A separate +35% 24-hour change and weekly resistance are not required for this entry.
+
+Entries use $3 margin, 3x cross, the same short profit plan, non-gold slot limits,
+profit-day lock, Telegram pause and durable order reconciliation. One candle
+cannot submit another order after restart or after an uncertain acknowledgement.
+The engine rechecks the same candle and that price is still above the prior ATH
+before submitting. Missing/incomplete history fails closed. The new entry does
+not cancel or replace an existing position/order. Its subsequent averaging still
+requires the existing >35% adverse move and weekly-resistance rules.
+Matched signals, executions and capacity blocks are logged with IST timestamps;
+capacity-blocked matches also use the existing Telegram alert channel.
+
+The pre-change Git checkpoint is `checkpoint-before-ath-short-2026-10-24`
+(commit `4bf815b`). Reverting also requires disabling `SCANNER_ATH_SHORT_ENABLED`
+and rebuilding the CoinDCX scanner service; reverting code does not undo trades.
+Binance and gold do not enable this rule.

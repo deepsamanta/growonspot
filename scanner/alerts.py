@@ -7,7 +7,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import requests
 
-TITLES={'COMMAND_ERROR':'Telegram command listener unavailable','ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
+TITLES={'ATH_SIGNAL_CAPACITY_BLOCKED':'ATH + 35% fifteen-minute surge observed; no available short slot',
+        'COMMAND_ERROR':'Telegram command listener unavailable','ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
         'LIMIT_SUBMITTED':'Short limit resting 2% above resistance','LIMIT_CANCEL_REQUESTED':'Entry remainder cancellation requested',
         'LIMIT_CANCELLED':'Unfilled short limit cancelled','CANCEL_UNCERTAIN':'Entry cancellation needs review',
         'ORDER_REJECTED':'Entry rejected','ORDER_UNCERTAIN':'Entry outcome requires review',
@@ -59,6 +60,8 @@ class Alerts:
         fields={'time_ist':datetime.fromtimestamp(now,ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S IST'),**fields}
         if fields.get('observed_at') is not None:
             fields['observed_at_ist']=datetime.fromtimestamp(fields['observed_at'],ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S IST')
+        if fields.get('candle_at') is not None:
+            fields['candle_start_ist']=datetime.fromtimestamp(fields['candle_at'],ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S IST')
         print(json.dumps({'event':event,'time':now,**fields}),flush=True)
         title=TITLES.get(event)
         if event=='SHORT_CAPACITY_DIAGNOSTIC' and fields.get('reason')=='SIGNAL_MATCHED_CAPACITY_BLOCKED':

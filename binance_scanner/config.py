@@ -10,6 +10,7 @@ load_dotenv('.env.binance', override=True)
 
 @dataclass(frozen=True)
 class BinanceConfig(ScannerConfig):
+    ath_short_enabled: bool = False  # CoinDCX-only entry extension.
     key: str = os.getenv('BINANCE_API_KEY', '')
     secret: str = os.getenv('BINANCE_API_SECRET', '')
     bot_token: str = os.getenv('BINANCE_TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN', '')

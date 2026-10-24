@@ -75,6 +75,15 @@ class AveragingTests(unittest.TestCase):
         self.ex.create.assert_not_called()
     def test_no_confirmed_weekly_resistance_waits(self):
         self.e.averager.history.daily.return_value=[];self.poll();self.ex.create.assert_not_called()
+    def test_ath_market_entry_keeps_same_weekly_averaging_rules(self):
+        self.db.update(self.ident,'OPEN',order_type='market_order',confirmation='ATH_15M_SURGE')
+        self.first['order_type']='market_order'
+        self.e.averager.history.daily.return_value=[]
+        self.poll();self.ex.create.assert_not_called()
+        self.e.averager.checked.clear()
+        self.e.averager.history.daily.return_value=bars([.60,.65,.72,.65,.60])
+        self.poll()
+        self.ex.create.assert_called_once_with(PAIR,'SELL',D(17),3,'crossed',D('.6829'),limit_price=D('.7344'))
     def test_partial_first_fill_uses_only_executed_quantity(self):
         self.first.update(status='partially_cancelled',total_quantity='20',cancelled_quantity='3')
         self.db.update(self.ident,'OPEN',quantity='20');self.poll()
