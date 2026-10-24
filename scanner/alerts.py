@@ -3,6 +3,8 @@ import json
 import queue
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import requests
 
 TITLES={'COMMAND_ERROR':'Telegram command listener unavailable','ENTRY_FILLED':'Entry executed','ORDER_SUBMITTED':'Market order submitted',
@@ -54,9 +56,16 @@ class Alerts:
             self.recent={k:v for k,v in self.recent.items() if now-v<300}
             if key in self.recent:return
             self.recent[key]=now
+        fields={'time_ist':datetime.fromtimestamp(now,ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S IST'),**fields}
+        if fields.get('observed_at') is not None:
+            fields['observed_at_ist']=datetime.fromtimestamp(fields['observed_at'],ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S IST')
         print(json.dumps({'event':event,'time':now,**fields}),flush=True)
-        if event not in TITLES:return
-        text='[MARKET SCANNER] '+TITLES[event]+'\n'+'\n'.join(f'{k}: {str(v)[:200]}' for k,v in fields.items())
+        title=TITLES.get(event)
+        if event=='SHORT_CAPACITY_DIAGNOSTIC' and fields.get('reason')=='SIGNAL_MATCHED_CAPACITY_BLOCKED':
+            title='Short signal observed but blocked: no available trade slot'
+            fields['note']='Observation only; execution checks were not run. Repeated observations are limited to once per 5 minutes.'
+        if title is None:return
+        text='[MARKET SCANNER] '+title+'\n'+'\n'.join(f'{k}: {str(v)[:200]}' for k,v in fields.items())
         try:self.pending.put_nowait(text[:4000])
         except queue.Full:print(json.dumps({'event':'SCANNER_ALERT_QUEUE_FULL'}),flush=True)
 

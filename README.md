@@ -177,7 +177,11 @@ minimum quantity, fresh account state, etc.) were not run, so it is not proof
 an exchange order would otherwise have been accepted. Stale data, insufficient
 history and out-of-range resistance have distinct reasons. A 30-second budget
 is checked between instruments; unfinished coverage is logged explicitly.
-These events stay in Docker logs without sending repetitive Telegram alerts.
+Matched short signals blocked by capacity also send a Telegram alert, limited
+to one matching alert per coin every five minutes. Other diagnostic outcomes
+stay in Docker logs. Events include `time_ist`; quote observations also include
+`observed_at_ist` (Asia/Kolkata). This is when the scanner observed the signal,
+not a claim about the first market tick when it became eligible.
 Diagnostics never queue candidates or submit/cancel orders. Normal capacity
 checks are refreshed afterward. Existing trading and position-management rules
 are unchanged. Log retention remains the configured Docker rotation policy.
