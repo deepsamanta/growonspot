@@ -17,12 +17,14 @@ from .capacity import BalanceCapacity
 from .averaging import TRIGGER
 from .long_averaging import DROP
 from .stream import AccountStream
+from .diagnostics import blocked_shorts
 
 
 def scan(config,outbox,health,emit,stopping):
     db=ScannerState(config.database,config.timezone);market=MarketData();history=History(market,db)
     exchange=Exchange(config,market)
     balance_capacity=BalanceCapacity(exchange,db)
+    diagnostic_at=0
     while not stopping.is_set():
         started=time.time()
         try:
@@ -30,7 +32,18 @@ def scan(config,outbox,health,emit,stopping):
             capacity=balance_capacity.get()
             checked=time.time()
             health.update(account_capacity=capacity.report(),capacity_checked=checked,scan_error=None)
+            if config.enabled and not capacity.allows('SELL') and checked-diagnostic_at>=300:
+                diagnostic_at=checked
+                emit('SCAN_CAPACITY_BLOCKED', reason='SHORT_SLOTS_UNAVAILABLE',
+                     occupied_pairs=sorted(capacity.pairs), **capacity.report())
+                try:
+                    blocked_shorts(config,capacity,market,history,emit,stopping)
+                except Exception as error:
+                    emit('SCAN_DIAGNOSTIC_ERROR',error_type=type(error).__name__)
+                # Diagnostic reads may take time; refresh before any trading scan.
+                capacity=balance_capacity.get();checked=time.time()
             if not config.enabled or not (capacity.allows('BUY') or capacity.allows('SELL')):
+                emit('SCAN_NOT_EVALUATED',reason='USER_PAUSED' if getattr(config,'paused',False) else 'ACCOUNT_POSITION_LIMIT' if config.enabled else 'ENTRIES_DISABLED',**capacity.report())
                 health.update(scan_paused_reason='USER_PAUSED' if getattr(config,'paused',False) else 'ACCOUNT_POSITION_LIMIT' if config.enabled else 'ENTRIES_DISABLED',scan_updated=checked)
                 stopping.wait(5 if getattr(config,'paused',False) else 30);continue
             instruments=market.active_instruments();quotes=market.quotes()
@@ -41,6 +54,7 @@ def scan(config,outbox,health,emit,stopping):
                 if time.time()-checked>15:
                     capacity=balance_capacity.get();checked=time.time()
                 if not (capacity.allows('BUY') or capacity.allows('SELL')):
+                    emit('SCAN_NOT_EVALUATED',reason='ACCOUNT_POSITION_LIMIT',remaining_instruments=len(instruments)-index,**capacity.report())
                     health.update(scan_paused_reason='ACCOUNT_POSITION_LIMIT');break
                 health.update(scan_progress=index,scan_updated=time.time())
                 if pair=='B-XAU_USDT' or pair in held or pair in capacity.pairs:continue
@@ -63,8 +77,9 @@ def scan(config,outbox,health,emit,stopping):
                         intraday=market.four_hour(pair,now)
                         candidate=evaluate(pair,quote,daily,now,low,first,intraday,allow_short=capacity.allows('SELL'),short_distance=config.short_distance)
                     if candidate:
+                        emit('SIGNAL_MATCHED',pair=pair,side=candidate.side,price=str(quote.price),change_24h=str(quote.change_24h),reference=str(candidate.reference),observed_at=quote.timestamp,**capacity.report())
                         try:outbox.put_nowait(candidate)
-                        except queue.Full:pass
+                        except queue.Full:emit('ENTRY_SKIPPED',pair=pair,reason='CANDIDATE_QUEUE_FULL')
                     stopping.wait(.05)
                 except Exception as error:
                     emit('MARKET_DATA_SKIPPED',pair=pair,error_type=type(error).__name__,reason=str(error) if isinstance(error,(ValueError,MarketDataError)) else '')

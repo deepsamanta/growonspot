@@ -162,3 +162,22 @@ Groups with Telegram privacy mode may require `/stop@your_bot` or a reply to the
 See [Telegram's message delivery rules](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
 Only the CoinDCX scanner polls this shared bot token; do not run another
 `getUpdates` consumer with the same token. Existing webhooks are never removed.
+
+### CoinDCX scanner entry diagnostics
+
+Docker logs now include `SCAN_NOT_EVALUATED` for paused/full-capacity scans,
+`SIGNAL_MATCHED` for queued candidates, and explicit queue-full skips.
+When short capacity is unavailable, a read-only diagnostic pass runs at most
+once every five minutes after checking account capacity. For active non-gold
+coins up more than 35%, `SHORT_CAPACITY_DIAGNOSTIC` records the observed price,
+24-hour change, nearest confirmed weekly resistance, distance and slot counts.
+`SIGNAL_MATCHED_CAPACITY_BLOCKED` means the market/history short conditions
+matched while the sampled capacity was full; execution checks (profit lock,
+minimum quantity, fresh account state, etc.) were not run, so it is not proof
+an exchange order would otherwise have been accepted. Stale data, insufficient
+history and out-of-range resistance have distinct reasons. A 30-second budget
+is checked between instruments; unfinished coverage is logged explicitly.
+These events stay in Docker logs without sending repetitive Telegram alerts.
+Diagnostics never queue candidates or submit/cancel orders. Normal capacity
+checks are refreshed afterward. Existing trading and position-management rules
+are unchanged. Log retention remains the configured Docker rotation policy.

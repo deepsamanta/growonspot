@@ -54,10 +54,14 @@ class CapacityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as f:
             stop=threading.Event();stop.wait=Mock(side_effect=lambda _:stop.set())
             ex=Mock();ex.wallet_balance.return_value=D(50);ex.all_positions.return_value=[position(f'B-C{i}_USDT',1) for i in range(6)]
-            market=Mock();health={}
+            market=Mock();market.active_instruments.return_value=[];market.quotes.return_value={};health={}
+            market.active_instruments.side_effect=lambda: (self.assertGreaterEqual(ex.all_positions.call_count,1) or [])
+            outbox=Mock()
             with patch('scanner.runner.Exchange',return_value=ex),patch('scanner.runner.MarketData',return_value=market):
-                scan(ScannerConfig(database=f+'/db',enabled=True),Mock(),health,Mock(),stop)
-            ex.all_positions.assert_called_once();market.active_instruments.assert_not_called();market.quotes.assert_not_called();market.candles.assert_not_called()
+                scan(ScannerConfig(database=f+'/db',enabled=True),outbox,health,Mock(),stop)
+            self.assertEqual(ex.all_positions.call_count,2)
+            market.active_instruments.assert_called_once();market.quotes.assert_called_once()
+            market.candles.assert_not_called();outbox.put_nowait.assert_not_called()
             self.assertEqual(health['scan_paused_reason'],'ACCOUNT_POSITION_LIMIT')
     def test_failed_account_read_prevents_scanning(self):
         with tempfile.TemporaryDirectory() as f:
